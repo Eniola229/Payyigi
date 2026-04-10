@@ -21,73 +21,38 @@ class User extends Authenticatable implements MustVerifyEmail
     public $incrementing = false;
 
     protected $fillable = [
-        'first_name',
-        'last_name',
-        'email',
-        'phone',
-        'password',
-        'transaction_pin',
-        'nin',
-        'nin_verified',
-        'nin_verified_at',
-        'nin_phone',
-        'kyc_level',
-        'kyc_verified_at',
-        'two_factor_enabled',
-        'two_factor_secret',
-        'two_factor_recovery_codes',
-        'is_active',
-        'is_suspended',
-        'suspension_reason',
-        'suspended_at',
-        'referral_code',
-        'referred_by',
-        'avatar',
-        'date_of_birth',
-        'bvn',
-        'bvn_verified',
-        'last_login_ip',
-        'last_login_at',
-        'last_login_device',
+        'first_name', 'last_name', 'email', 'phone', 'password',
+        'transaction_pin', 'nin', 'nin_verified', 'nin_verified_at', 'nin_phone',
+        'two_factor_enabled', 'two_factor_secret', 'two_factor_recovery_codes',
+        'is_active', 'is_suspended', 'suspension_reason', 'suspended_at',
+        'referral_code', 'referred_by', 'avatar', 'date_of_birth',
+        'last_login_ip', 'last_login_at', 'last_login_device',
     ];
 
     protected $hidden = [
-        'password',
-        'transaction_pin',
-        'two_factor_secret',
-        'two_factor_recovery_codes',
-        'nin',
-        'bvn',
-        'remember_token',
+        'password', 'transaction_pin', 'two_factor_secret',
+        'two_factor_recovery_codes', 'nin', 'remember_token',
     ];
 
     protected $casts = [
-        'email_verified_at'        => 'datetime',
-        'nin_verified_at'          => 'datetime',
-        'kyc_verified_at'          => 'datetime',
-        'suspended_at'             => 'datetime',
-        'last_login_at'            => 'datetime',
-        'nin_verified'             => 'boolean',
-        'bvn_verified'             => 'boolean',
-        'two_factor_enabled'       => 'boolean',
-        'is_active'                => 'boolean',
-        'is_suspended'             => 'boolean',
+        'email_verified_at'         => 'datetime',
+        'nin_verified_at'           => 'datetime',
+        'suspended_at'              => 'datetime',
+        'last_login_at'             => 'datetime',
+        'nin_verified'              => 'boolean',
+        'two_factor_enabled'        => 'boolean',
+        'is_active'                 => 'boolean',
+        'is_suspended'              => 'boolean',
         'two_factor_recovery_codes' => 'encrypted:array',
-        'two_factor_secret'        => 'encrypted',
-        'nin'                      => 'encrypted',
-        'bvn'                      => 'encrypted',
+        'two_factor_secret'         => 'encrypted',
+        'nin'                       => 'encrypted',
     ];
 
-    // ─── Relationships ───────────────────────────────────────────────────────
+    // ── Relationships ─────────────────────────────────────────────────────────
 
     public function wallet(): HasOne
     {
         return $this->hasOne(Wallet::class)->where('currency', 'NGN');
-    }
-
-    public function wallets(): HasMany
-    {
-        return $this->hasMany(Wallet::class);
     }
 
     public function bankAccounts(): HasMany
@@ -95,19 +60,9 @@ class User extends Authenticatable implements MustVerifyEmail
         return $this->hasMany(BankAccount::class);
     }
 
-    public function defaultBankAccount(): HasOne
-    {
-        return $this->hasOne(BankAccount::class)->where('is_default', true);
-    }
-
     public function transactions(): HasMany
     {
         return $this->hasMany(Transaction::class);
-    }
-
-    public function kycDocuments(): HasMany
-    {
-        return $this->hasMany(KycDocument::class);
     }
 
     public function devices(): HasMany
@@ -120,19 +75,14 @@ class User extends Authenticatable implements MustVerifyEmail
         return $this->hasMany(OtpCode::class);
     }
 
-    public function auditLogs(): HasMany
-    {
-        return $this->hasMany(AuditLog::class);
-    }
-
-    // ─── Accessors ───────────────────────────────────────────────────────────
+    // ── Accessors ─────────────────────────────────────────────────────────────
 
     public function getFullNameAttribute(): string
     {
         return "{$this->first_name} {$this->last_name}";
     }
 
-    // ─── Security Methods ────────────────────────────────────────────────────
+    // ── Security ──────────────────────────────────────────────────────────────
 
     public function verifyTransactionPin(string $pin): bool
     {
@@ -159,37 +109,22 @@ class User extends Authenticatable implements MustVerifyEmail
         return $this->two_factor_enabled && !is_null($this->two_factor_secret);
     }
 
-    public function hasVerifiedNin(): bool
-    {
-        return $this->nin_verified;
-    }
-
-    public function canWithdraw(): bool
+    public function canTransact(): bool
     {
         return $this->hasVerifiedEmail()
-            && $this->hasVerifiedNin()
-            && $this->kyc_level !== 'none'
-            && $this->isAccountActive();
+            && $this->nin_verified
+            && $this->isAccountActive()
+            && !is_null($this->transaction_pin);
     }
 
-    public function dailyWithdrawalLimit(): int
+    public function dailyWithdrawalLimit(): float
     {
-        return match ($this->kyc_level) {
-            'basic'    => 500000000, // ₦5,000,000 in kobo
-            'advanced' => PHP_INT_MAX,
-            default    => 50000000, // ₦500,000 in kobo (no kyc)
-        };
+        // NIN verified = ₦3,000,000/day. No tiers needed.
+        return 3_000_000;
     }
-
-    // ─── Scopes ──────────────────────────────────────────────────────────────
 
     public function scopeActive($query)
     {
         return $query->where('is_active', true)->where('is_suspended', false);
-    }
-
-    public function scopeKycVerified($query)
-    {
-        return $query->whereIn('kyc_level', ['basic', 'advanced']);
     }
 }

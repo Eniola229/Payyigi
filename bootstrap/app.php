@@ -12,7 +12,7 @@ use Illuminate\Http\Request;
 
 return Application::configure(basePath: dirname(__DIR__))
     ->withRouting(
-        web: __DIR__ . '/../routes/web.php', 
+        web: __DIR__ . '/../routes/web.php',
         api: __DIR__ . '/../routes/api.php',
         apiPrefix: 'api/v1',
         commands: __DIR__ . '/../routes/console.php',
@@ -29,11 +29,15 @@ return Application::configure(basePath: dirname(__DIR__))
             'audit.log'       => LogRequestToAudit::class,
         ]);
 
+        // ── Sanctum stateful domains ──────────────────────────────────────────
+        $middleware->statefulApi();
+
         // ── API-wide throttling ───────────────────────────────────────────────
         $middleware->throttleApi();
     })
     ->withExceptions(function (Exceptions $exceptions) {
 
+        // Return JSON for all API exceptions
         $exceptions->render(function (\Illuminate\Auth\AuthenticationException $e, Request $request) {
             if ($request->expectsJson() || $request->is('api/*')) {
                 return response()->json(['message' => 'Unauthenticated.'], 401);

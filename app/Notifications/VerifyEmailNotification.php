@@ -13,7 +13,7 @@ class VerifyEmailNotification extends Notification implements ShouldQueue
     use Queueable;
 
     public function via(object $notifiable): array
-    { 
+    {
         return ['mail'];
     }
 
@@ -34,7 +34,7 @@ class VerifyEmailNotification extends Notification implements ShouldQueue
     protected function verificationUrl(object $notifiable): string
     {
         return URL::temporarySignedRoute(
-            'api.verification.verify',  // Use the new name
+            'verification.verify',
             now()->addMinutes(60),
             [
                 'id'   => $notifiable->getKey(),

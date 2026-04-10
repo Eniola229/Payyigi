@@ -27,10 +27,9 @@ return [
 
     // ── Twilio ────────────────────────────────────────────────────────────────
     'twilio' => [
-        'sid'        => env('TWILIO_SID'),
-        'token'      => env('TWILIO_AUTH_TOKEN'),
-        'from'       => env('TWILIO_FROM', env('TWILIO_NUMBER')), // supports both
-        'verify_sid' => env('TWILIO_VERIFY_SID'),
+        'sid'   => env('TWILIO_SID'),
+        'token' => env('TWILIO_AUTH_TOKEN'),
+        'from'  => env('TWILIO_FROM', env('TWILIO_NUMBER')),
     ],
 
     // ── Korapay (NIN verification + future payments) ──────────────────────────

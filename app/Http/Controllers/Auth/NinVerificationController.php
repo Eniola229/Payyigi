@@ -81,6 +81,14 @@ class NinVerificationController extends Controller
         // This proves the person submitting the NIN actually owns it.
         $ninPhone = $ninData['phone_number'] ?? null;
 
+        Log::info('NIN lookup phone number', [
+            'user_id' => $user->id,
+            'nin_last4' => substr($request->nin, -4),
+            'returned_phone' => $ninPhone,
+            'returned_phone_last4' => $ninPhone ? substr($ninPhone, -4) : 'null',
+            'full_nin_data' => $ninData // This will show everything Korapay returned
+        ]);
+
         if (!$ninPhone) {
             return response()->json([
                 'message' => 'No phone number found for this NIN. Please contact support.',
@@ -232,7 +240,7 @@ class NinVerificationController extends Controller
         ]);
 
         return response()->json([
-            'message' => 'NIN verified successfully. You can now proceed to complete KYC.',
+            'message' => 'NIN verified successfully. Welcome fully onboard.',
         ]);
     }
 

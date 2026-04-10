@@ -8,57 +8,48 @@ use App\Http\Controllers\Auth\RegisterController;
 use App\Http\Controllers\Auth\TwoFactorController;
 use App\Http\Controllers\BreetWebhookController;
 use App\Http\Controllers\User\BankAccountController;
-use App\Http\Controllers\User\SellOrderController;
-use App\Http\Controllers\User\WalletController;
-use App\Http\Controllers\User\WithdrawalController;
+use App\Http\Controllers\User\BuyController;
+use App\Http\Controllers\User\SellController;
+use App\Http\Controllers\User\SwapController;
+use App\Http\Controllers\User\WithdrawController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
+// ── Webhooks (no auth — verified via HMAC) ───────────────────────────────────
+Route::post('/webhooks/breet', [BreetWebhookController::class, 'handle']);
 
-/*
-|--------------------------------------------------------------------------
-| API Routes — PayYigi
-|--------------------------------------------------------------------------
-*/
-
-// ── Public Auth Routes ───────────────────────────────────────────────────────
+// ── Public Auth ──────────────────────────────────────────────────────────────
 Route::prefix('auth')->group(function () {
     Route::post('/register', RegisterController::class);
     Route::post('/login',    LoginController::class);
 
     Route::get('/email/verify/{id}/{hash}', [EmailVerificationController::class, 'verify'])
-        ->name('api.verification.verify');
+         ->name('verification.verify');
     Route::post('/email/resend', [EmailVerificationController::class, 'resend'])
          ->middleware('throttle:3,10');
 
     Route::post('/password/forgot', [PasswordController::class, 'forgotPassword'])
          ->middleware('throttle:3,10');
-    Route::post('/password/reset', [PasswordController::class, 'resetPassword']);
+    Route::post('/password/reset',  [PasswordController::class, 'resetPassword']);
 
     Route::post('/two-factor/verify', [TwoFactorController::class, 'verify'])
          ->middleware('throttle:10,5');
 });
 
-// ── Breet Webhooks (public — signature validated inside controller) ────────────
-Route::post('/webhooks/breet', [BreetWebhookController::class, 'handle']);
-
 // ── Authenticated Routes ─────────────────────────────────────────────────────
 Route::middleware(['auth:sanctum', 'account.active'])->group(function () {
 
-    // ── Auth management ──────────────────────────────────────────────────────
+    // Auth management
     Route::prefix('auth')->group(function () {
         Route::post('/logout', function (Request $request) {
             $request->user()->currentAccessToken()->delete();
             \App\Models\AuditLog::record('auth.logout');
-            return response()->json(['message' => 'Logged out successfully.']);
+            return response()->json(['message' => 'Logged out.']);
         });
-
         Route::post('/logout-all', function (Request $request) {
             $request->user()->tokens()->delete();
-            \App\Models\AuditLog::record('auth.logout_all');
             return response()->json(['message' => 'Logged out from all devices.']);
         });
-
         Route::post('/password/change', [PasswordController::class, 'changePassword']);
         Route::post('/pin/set',         [PasswordController::class, 'setTransactionPin']);
         Route::post('/pin/change',      [PasswordController::class, 'changeTransactionPin']);
@@ -69,89 +60,84 @@ Route::middleware(['auth:sanctum', 'account.active'])->group(function () {
             Route::post('/disable', [TwoFactorController::class, 'disable']);
         });
 
-        Route::get('/devices', function (Request $request) {
-            return response()->json([
-                'data' => $request->user()->devices()
-                    ->orderByDesc('last_used_at')
-                    ->get(['id','device_name','device_type','browser','platform','ip_address','is_trusted','last_used_at']),
-            ]);
-        });
-        Route::delete('/devices/{device}', function (Request $request, \App\Models\UserDevice $device) {
-            abort_if($device->user_id !== $request->user()->id, 403);
-            $device->delete();
+        Route::get('/devices',           fn(Request $r) => response()->json(['data' => $r->user()->devices()->latest()->get()]));
+        Route::delete('/devices/{device}', function (Request $r, \App\Models\UserDevice $d) {
+            abort_if($d->user_id !== $r->user()->id, 403);
+            $d->delete();
             return response()->json(['message' => 'Device removed.']);
         });
     });
 
-    // ── NIN Verification ─────────────────────────────────────────────────────
+    // NIN Verification
     Route::prefix('verification/nin')->group(function () {
-        Route::post('/initiate', [NinVerificationController::class, 'initiateVerification'])
-             ->middleware('throttle:3,15');
-        Route::post('/confirm',  [NinVerificationController::class, 'confirmVerification'])
-             ->middleware('throttle:5,15');
-        Route::post('/resend',   [NinVerificationController::class, 'resendOtp'])
-             ->middleware('throttle:2,10');
+        Route::post('/initiate', [NinVerificationController::class, 'initiateVerification'])->middleware('throttle:3,15');
+        Route::post('/confirm',  [NinVerificationController::class, 'confirmVerification'])->middleware('throttle:5,15');
+        Route::post('/resend',   [NinVerificationController::class, 'resendOtp'])->middleware('throttle:2,10');
     });
 
-    // ── Profile ───────────────────────────────────────────────────────────────
-    Route::prefix('user')->group(function () {
-        Route::get('/profile', function (Request $request) {
-            return response()->json(['data' => $request->user()->load('wallet')]);
-        });
-        Route::patch('/profile', function (Request $request) {
-            $request->validate([
-                'first_name'    => 'sometimes|string|min:2|max:50|regex:/^[a-zA-Z\s\-]+$/',
-                'last_name'     => 'sometimes|string|min:2|max:50|regex:/^[a-zA-Z\s\-]+$/',
-                'date_of_birth' => 'sometimes|date|before:-18 years',
-            ]);
-            $request->user()->update($request->only('first_name', 'last_name', 'date_of_birth'));
-            return response()->json(['message' => 'Profile updated.', 'data' => $request->user()->fresh()]);
-        });
+    // Profile & Wallet
+    Route::get('/user/profile', fn(Request $r) => response()->json(['data' => $r->user()->load('wallet')]));
+    Route::patch('/user/profile', function (Request $r) {
+        $r->validate(['first_name' => 'sometimes|string|min:2|max:50', 'last_name' => 'sometimes|string|min:2|max:50', 'date_of_birth' => 'sometimes|date|before:-18 years']);
+        $r->user()->update($r->only('first_name', 'last_name', 'date_of_birth'));
+        return response()->json(['data' => $r->user()->fresh()]);
+    });
+    Route::get('/wallet', fn(Request $r) => response()->json(['data' => $r->user()->wallet]));
+
+    // Notifications
+    Route::get('/notifications', fn(Request $r) => response()->json(['data' => $r->user()->notifications()->paginate(20)]));
+    Route::post('/notifications/{id}/read', function (Request $r, $id) {
+        $r->user()->notifications()->find($id)?->markAsRead();
+        return response()->json(['message' => 'Marked as read.']);
+    });
+    Route::post('/notifications/read-all', function (Request $r) {
+        $r->user()->unreadNotifications->markAsRead();
+        return response()->json(['message' => 'All marked as read.']);
     });
 
-    // ── Wallet ────────────────────────────────────────────────────────────────
-    Route::prefix('wallet')->group(function () {
-        Route::get('/balance',      [WalletController::class, 'balance']);
-        Route::get('/transactions', [WalletController::class, 'transactions']);
-    });
-
-    // ── Transactions (generic) ────────────────────────────────────────────────
-    Route::get('/transactions', function (Request $request) {
+    // Transactions
+    Route::get('/transactions', function (Request $r) {
         return response()->json([
-            'data' => $request->user()->transactions()
-                ->when($request->type,   fn($q) => $q->where('type', $request->type))
-                ->when($request->status, fn($q) => $q->where('status', $request->status))
+            'data' => $r->user()->transactions()
+                ->when($r->type,   fn($q) => $q->where('type', $r->type))
+                ->when($r->status, fn($q) => $q->where('status', $r->status))
                 ->latest()->paginate(20),
         ]);
     });
-    Route::get('/transactions/{transaction}', function (Request $request, \App\Models\Transaction $transaction) {
-        abort_if($transaction->user_id !== $request->user()->id, 403);
-        return response()->json(['data' => $transaction->load('bankAccount')]);
+    Route::get('/transactions/{reference}', function (Request $r, string $ref) {
+        $txn = $r->user()->transactions()->where('reference', $ref)->firstOrFail();
+        return response()->json(['data' => $txn]);
     });
 
-    // ── Bank Accounts ─────────────────────────────────────────────────────────
-    Route::prefix('bank-accounts')->middleware('nin.verified')->group(function () {
-        Route::get('/',                        [BankAccountController::class, 'index']);
-        Route::get('/banks',                   [BankAccountController::class, 'banks']);
-        Route::get('/verify',                  [BankAccountController::class, 'verify']);
-        Route::post('/',                       [BankAccountController::class, 'store']);
-        Route::delete('/{bankAccount}',        [BankAccountController::class, 'destroy']);
-        Route::patch('/{bankAccount}/default', [BankAccountController::class, 'setDefault']);
-    });
+    // ── NIN-verified routes ───────────────────────────────────────────────────
+    Route::middleware(['nin.verified'])->group(function () {
 
-    // ── Sell Orders ───────────────────────────────────────────────────────────
-    Route::prefix('sell')->middleware('nin.verified')->group(function () {
-        Route::get('/assets',               [SellOrderController::class, 'supportedAssets']);
-        Route::get('/rate',                 [SellOrderController::class, 'getRate']);
-        Route::get('/orders',               [SellOrderController::class, 'index']);
-        Route::get('/orders/{transaction}', [SellOrderController::class, 'show']);
-        Route::post('/orders',              [SellOrderController::class, 'createOrder'])->middleware('txn.pin');
-    });
+        // Bank accounts
+        Route::prefix('bank-accounts')->group(function () {
+            Route::get('/',                          [BankAccountController::class, 'index']);
+            Route::post('/',                         [BankAccountController::class, 'store']);
+            Route::delete('/{bankAccount}',          [BankAccountController::class, 'destroy']);
+            Route::patch('/{bankAccount}/default',   [BankAccountController::class, 'setDefault']);
+        });
 
-    // ── Withdrawals ───────────────────────────────────────────────────────────
-    Route::prefix('withdrawals')->middleware('nin.verified')->group(function () {
-        Route::get('/',  [WithdrawalController::class, 'history']);
-        Route::post('/', [WithdrawalController::class, 'withdraw'])->middleware('txn.pin');
-    });
+        // Sell — credits wallet on completion
+        Route::get('/sell/rate',       [SellController::class, 'getRate']);
+        Route::post('/sell',           [SellController::class, 'initiate'])->middleware('txn.pin');
+        Route::get('/sell/history',    [SellController::class, 'history']);
+        Route::get('/sell/{reference}',[SellController::class, 'show']);
 
+        // Buy — deducts wallet, sends crypto to user's external address
+        Route::get('/buy/rate',        [BuyController::class, 'getRate']);
+        Route::post('/buy',            [BuyController::class, 'initiate'])->middleware('txn.pin');
+        Route::get('/buy/history',     [BuyController::class, 'history']);
+
+        // Swap — crypto to crypto
+        Route::get('/swap/rate',       [SwapController::class, 'getRate']);
+        Route::post('/swap',           [SwapController::class, 'initiate'])->middleware('txn.pin');
+        Route::get('/swap/history',    [SwapController::class, 'history']);
+
+        // Withdraw — deducts wallet, sends NGN to bank
+        Route::post('/withdraw',          [WithdrawController::class, 'initiate'])->middleware('txn.pin');
+        Route::get('/withdraw/history',   [WithdrawController::class, 'history']);
+    });
 });

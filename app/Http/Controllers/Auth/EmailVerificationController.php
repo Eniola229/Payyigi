@@ -17,30 +17,25 @@ class EmailVerificationController extends Controller
      */
     public function verify(Request $request, string $id, string $hash): JsonResponse
     {
-        // If your users table uses UUID as primary key
+        // Remove this line:
+        // if (!URL::hasValidSignature($request)) {
+        //     return response()->json(['message' => 'Invalid or expired verification link.'], 403);
+        // }
+        
+        // The 'signed' middleware handles it automatically
+        
         $user = User::where('id', $id)->firstOrFail();
         
-        // Or if you have a trait for UUIDs, this also works:
-        // $user = User::findOrFail($id); // Should work if UUID trait is configured properly
-        
-        // Validate signed URL
-        if (!URL::hasValidSignature($request)) {
-            return response()->json(['message' => 'Invalid or expired verification link.'], 403);
-        }
-
-        // Validate hash
         if (!hash_equals(sha1($user->getEmailForVerification()), $hash)) {
             return response()->json(['message' => 'Invalid verification link.'], 403);
         }
-
+        
         if ($user->hasVerifiedEmail()) {
             return response()->json(['message' => 'Email already verified.']);
         }
-
+        
         $user->markEmailAsVerified();
-
-        AuditLog::record('user.email_verified', ['user_id' => $user->id]);
-
+        
         return response()->json(['message' => 'Email verified successfully. You can now log in.']);
     }
 

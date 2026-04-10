@@ -9,185 +9,156 @@ class BreetService
 {
     private string $baseUrl;
     private string $apiKey;
-    private string $apiSecret;
 
     public function __construct()
     {
-        $this->baseUrl   = config('services.breet.base_url', 'https://api.breet.app/v1');
-        $this->apiKey    = config('services.breet.api_key');
-        $this->apiSecret = config('services.breet.api_secret');
+        $this->baseUrl = config('services.breet.base_url');
+        $this->apiKey  = config('services.breet.api_key');
     }
 
-    // ─── Rates ───────────────────────────────────────────────────────────────
+    private function http()
+    {
+        return Http::withHeaders([
+            'Authorization' => 'Bearer ' . $this->apiKey,
+            'Content-Type'  => 'application/json',
+            'Accept'        => 'application/json',
+        ])->timeout(30);
+    }
 
-    /**
-     * Get current market rate for a crypto asset.
-     * Returns NGN rate per 1 unit of the asset.
-     */
     public function getRate(string $asset): array
     {
-        $response = $this->request('GET', "/rates/{$asset}/NGN");
+        $response = $this->http()->get("{$this->baseUrl}/rates/{$asset}");
 
-        return [
-            'asset'       => strtoupper($asset),
-            'currency'    => 'NGN',
-            'market_rate' => (float) $response['data']['rate'],
-            'fetched_at'  => now()->toISOString(),
-        ];
+        if ($response->failed()) {
+            Log::error('Breet getRate failed', ['asset' => $asset, 'response' => $response->json()]);
+            throw new \Exception("Unable to fetch rate for {$asset}. Please try again.");
+        }
+
+        return $response->json('data');
     }
 
-    /**
-     * Get rates for all supported assets at once.
-     */
     public function getAllRates(): array
     {
-        $response = $this->request('GET', '/rates?currency=NGN');
-        return $response['data'] ?? [];
+        $response = $this->http()->get("{$this->baseUrl}/rates");
+
+        if ($response->failed()) {
+            throw new \Exception('Unable to fetch rates. Please try again.');
+        }
+
+        return $response->json('data');
     }
 
-    // ─── Sell Orders ─────────────────────────────────────────────────────────
-
-    /**
-     * Create a sell order on Breet.
-     * Breet generates a unique deposit address for the user to send crypto to.
-     *
-     * @param string $asset        e.g. BTC, USDT, SOL
-     * @param string $network      e.g. bitcoin, trc20, erc20, bep20, solana
-     * @param float  $amount       crypto amount the user will send
-     * @param string $reference    our internal transaction reference
-     * @param array  $bankAccount  ['account_number', 'bank_code', 'account_name']
-     */
     public function createSellOrder(
         string $asset,
         string $network,
         float  $amount,
-        string $reference,
         array  $bankAccount,
+        string $reference,
     ): array {
-        $response = $this->request('POST', '/orders/sell', [
+        $payload = [
             'asset'          => strtolower($asset),
             'network'        => strtolower($network),
             'amount'         => $amount,
+            'bank_code'      => $bankAccount['bank_code']      ?? null,
+            'account_number' => $bankAccount['account_number'] ?? null,
+            'account_name'   => $bankAccount['account_name']   ?? null,
             'reference'      => $reference,
-            'bank_account'   => [
-                'account_number' => $bankAccount['account_number'],
-                'bank_code'      => $bankAccount['bank_code'],
-                'account_name'   => $bankAccount['account_name'],
-            ],
-        ]);
+        ];
 
-        return $response['data'];
-    }
+        $response = $this->http()->post("{$this->baseUrl}/transactions/sell", $payload);
 
-    /**
-     * Get status of an existing order.
-     */
-    public function getOrder(string $breetOrderId): array
-    {
-        $response = $this->request('GET', "/orders/{$breetOrderId}");
-        return $response['data'];
-    }
-
-    // ─── Withdrawals ─────────────────────────────────────────────────────────
-
-    /**
-     * Initiate a bank payout via Breet.
-     * For automatic withdrawal — Breet sends NGN to the user's bank account.
-     */
-    public function initiateWithdrawal(
-        float  $amount,
-        string $reference,
-        array  $bankAccount,
-    ): array {
-        $response = $this->request('POST', '/payouts', [
-            'amount'    => $amount,
-            'currency'  => 'NGN',
-            'reference' => $reference,
-            'bank_account' => [
-                'account_number' => $bankAccount['account_number'],
-                'bank_code'      => $bankAccount['bank_code'],
-                'account_name'   => $bankAccount['account_name'],
-            ],
-        ]);
-
-        return $response['data'];
-    }
-
-    // ─── Webhook Validation ───────────────────────────────────────────────────
-
-    /**
-     * Validate the webhook signature from Breet.
-     * Breet signs payloads with HMAC-SHA256.
-     */
-    public function validateWebhookSignature(string $payload, string $signature): bool
-    {
-        $expected = hash_hmac('sha256', $payload, config('services.breet.webhook_secret'));
-        return hash_equals($expected, $signature);
-    }
-
-    // ─── Bank Utilities ───────────────────────────────────────────────────────
-
-    /**
-     * Verify a Nigerian bank account via Breet.
-     * Returns account name for confirmation before saving.
-     */
-    public function verifyBankAccount(string $accountNumber, string $bankCode): array
-    {
-        $response = $this->request('POST', '/banks/verify', [
-            'account_number' => $accountNumber,
-            'bank_code'      => $bankCode,
-        ]);
-
-        return $response['data'];
-    }
-
-    /**
-     * Get list of Nigerian banks supported.
-     */
-    public function getBanks(): array
-    {
-        $response = $this->request('GET', '/banks');
-        return $response['data'] ?? [];
-    }
-
-    // ─── HTTP Helper ──────────────────────────────────────────────────────────
-
-    private function request(string $method, string $endpoint, array $data = []): array
-    {
-        $url = $this->baseUrl . $endpoint;
-
-        $http = Http::withHeaders([
-            'Authorization' => 'Bearer ' . $this->apiKey,
-            'x-api-secret'  => $this->apiSecret,
-            'Content-Type'  => 'application/json',
-            'Accept'        => 'application/json',
-        ])->timeout(30);
-
-        $response = match (strtoupper($method)) {
-            'GET'    => $http->get($url, $data),
-            'POST'   => $http->post($url, $data),
-            'PUT'    => $http->put($url, $data),
-            'DELETE' => $http->delete($url, $data),
-            default  => throw new \InvalidArgumentException("Unsupported HTTP method: {$method}"),
-        };
-
-        Log::info('Breet API request', [
-            'method'      => $method,
-            'endpoint'    => $endpoint,
+        Log::info('Breet createSellOrder', [
+            'reference'   => $reference,
+            'asset'       => $asset,
             'status_code' => $response->status(),
         ]);
 
         if ($response->failed()) {
-            $error = $response->json('message') ?? 'Breet API request failed.';
-            Log::error('Breet API error', [
-                'endpoint' => $endpoint,
-                'status'   => $response->status(),
-                'error'    => $error,
-                'body'     => $response->json(),
-            ]);
-            throw new \Exception($error, $response->status());
+            $error = $response->json('message') ?? 'Failed to create sell order.';
+            Log::error('Breet createSellOrder failed', ['reference' => $reference, 'error' => $error]);
+            throw new \Exception($error);
         }
 
-        return $response->json();
+        return $response->json('data');
+    }
+
+    public function getOrder(string $breetOrderId): array
+    {
+        $response = $this->http()->get("{$this->baseUrl}/transactions/{$breetOrderId}");
+
+        if ($response->failed()) {
+            throw new \Exception('Unable to fetch order status.');
+        }
+
+        return $response->json('data');
+    }
+
+    public function verifyWebhookSignature(string $rawPayload, string $signature): bool
+    {
+        $secret   = config('services.breet.webhook_secret');
+        $expected = hash_hmac('sha256', $rawPayload, $secret);
+        return hash_equals($expected, $signature);
+    }
+
+    /**
+     * Apply spread to Breet's market rate.
+     * Sell: user gets LESS than market (we keep the difference as spread revenue)
+     * e.g. market = ₦1500, spread 4% → user gets ₦1440 per unit
+     */
+    public function applySpread(float $marketRate, float $spreadPercent = null): float
+    {
+        $spread = $spreadPercent ?? config('payyigi.spread_percent', 4);
+        return round($marketRate * (1 - ($spread / 100)), 2);
+    }
+
+    public function calculateNgnOut(float $cryptoAmount, float $rate): float
+    {
+        return round($cryptoAmount * $rate, 2);
+    }
+
+    /**
+     * Calculate all fees for a sell transaction.
+     *
+     * Given NGN amount BEFORE fees:
+     *   - Platform fee: 0.5% → goes to PayYigi
+     *   - Breet fee:    0.5% → goes to Breet
+     *   - Total cost:   1.0% deducted from what user receives
+     *
+     * Spread revenue is SEPARATE — already baked into the displayed rate.
+     * Fees are deducted from the NGN payout to the user's wallet.
+     *
+     * Returns:
+     *   gross_ngn     — NGN at displayed rate before fees
+     *   platform_fee  — PayYigi's 0.5% cut
+     *   breet_fee     — Breet's 0.5% cut
+     *   total_fee     — combined 1%
+     *   net_ngn       — what user actually receives in wallet
+     *   spread_amount — PayYigi's spread revenue (from rate difference)
+     */
+    public function calculateFees(float $cryptoAmount, float $marketRate): array
+    {
+        $spreadPercent   = config('payyigi.spread_percent', 4);
+        $platformFeePct  = config('payyigi.platform_fee_percent', 0.5);
+        $breetFeePct     = config('payyigi.breet_fee_percent', 0.5);
+
+        $displayRate  = $this->applySpread($marketRate, $spreadPercent);
+        $grossNgn     = $this->calculateNgnOut($cryptoAmount, $displayRate);
+        $spreadAmount = $this->calculateNgnOut($cryptoAmount, $marketRate) - $grossNgn;
+
+        $platformFee  = round($grossNgn * ($platformFeePct / 100), 2);
+        $breetFee     = round($grossNgn * ($breetFeePct / 100), 2);
+        $totalFee     = round($platformFee + $breetFee, 2);
+        $netNgn       = round($grossNgn - $totalFee, 2);
+
+        return [
+            'gross_ngn'     => $grossNgn,
+            'platform_fee'  => $platformFee,
+            'breet_fee'     => $breetFee,
+            'total_fee'     => $totalFee,
+            'net_ngn'       => $netNgn,       // credited to wallet
+            'spread_amount' => $spreadAmount,  // our spread profit
+            'display_rate'  => $displayRate,
+            'market_rate'   => $marketRate,
+        ];
     }
 }
