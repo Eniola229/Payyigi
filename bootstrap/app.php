@@ -27,6 +27,10 @@ return Application::configure(basePath: dirname(__DIR__))
             'nin.verified'    => RequireNinVerified::class,
             'kyc'             => RequireKyc::class,
             'audit.log'       => LogRequestToAudit::class,
+            'admin.active'    => \App\Http\Middleware\EnsureAdminIsActive::class,
+            'role'            => \Spatie\Permission\Middleware\RoleMiddleware::class,
+            'permission'      => \Spatie\Permission\Middleware\PermissionMiddleware::class,
+            'role_or_permission' => \Spatie\Permission\Middleware\RoleOrPermissionMiddleware::class,
         ]);
 
         // ── Sanctum stateful domains ──────────────────────────────────────────

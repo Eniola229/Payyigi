@@ -87,6 +87,11 @@ class Transaction extends Model
         return $this->belongsTo(BankAccount::class);
     }
 
+    public function fraudFlags(): BelongsTo
+    {
+        return $this->belongsTo(FraudFlag::class, 'id');
+    }
+
     // ─── Helpers ─────────────────────────────────────────────────────────────
 
     public function isPending(): bool     { return $this->status === 'pending'; }

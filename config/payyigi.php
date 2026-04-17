@@ -1,13 +1,18 @@
 <?php
 
 return [
-    'spread_percent'       => env('PAYYIGI_SPREAD_PERCENT', 4),
-    'rate_lock_seconds'    => env('PAYYIGI_RATE_LOCK_SECONDS', 60),
+    'rate_lock_seconds' => env('PAYYIGI_RATE_LOCK_SECONDS', 60),
 
-    // Fees deducted from the NGN payout
-    'platform_fee_percent' => env('PAYYIGI_PLATFORM_FEE', 0.5), // PayYigi's own fee
-    'breet_fee_percent'    => 0.5,                               // Breet's fixed fee
+    // Breet's fixed fee — this is PayYigi's cost, not charged to user separately
+    'breet_fee_percent' => 0.5,
 
+    // Tiered platform fee (spread) based on transaction value in USD
+    // < 100  → 3.5%
+    // >= 100 → 2.5%
+    'platform_fee_tiers' => [
+        ['min' => 0,   'max' => 100,  'percent' => 3.5], // < 100 units
+        ['min' => 100, 'max' => null, 'percent' => 2.5], // >= 100 units
+    ],
     'supported_assets' => ['BTC', 'USDT', 'SOL', 'ETH', 'BNB', 'TRX', 'XRP', 'LTC', 'BCH', 'USDC', 'AVAX', 'TON', 'DOGE'],
 
     'supported_networks' => [

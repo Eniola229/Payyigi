@@ -140,4 +140,63 @@ Route::middleware(['auth:sanctum', 'account.active'])->group(function () {
         Route::post('/withdraw',          [WithdrawController::class, 'initiate'])->middleware('txn.pin');
         Route::get('/withdraw/history',   [WithdrawController::class, 'history']);
     });
+
+    // ── Admin Routes ─────────────────────────────────────────────────────────────
+    Route::prefix('admin')->group(function () {
+
+        // Public admin auth
+        Route::post('/login', \App\Http\Controllers\Admin\Auth\AdminLoginController::class);
+
+        // Authenticated admin routes
+        Route::middleware(['auth:admin', 'admin.active'])->group(function () {
+
+            Route::post('/logout', function (Request $request) {
+                $request->user('admin')->currentAccessToken()->delete();
+                return response()->json(['message' => 'Logged out.']);
+            });
+
+            // Dashboard — any authenticated admin
+            Route::get('/dashboard', \App\Http\Controllers\Admin\DashboardController::class)
+                 ->middleware('can:view_dashboard_stats,admin');
+ 
+            // Users
+            Route::prefix('users')->middleware('can:view_users,admin')->group(function () {
+                Route::get('/',                     [\App\Http\Controllers\Admin\UserManagementController::class, 'index']);
+                Route::get('/{user}',               [\App\Http\Controllers\Admin\UserManagementController::class, 'show']);
+                Route::get('/{user}/transactions',  [\App\Http\Controllers\Admin\UserManagementController::class, 'transactions']);
+                Route::post('/{user}/suspend',      [\App\Http\Controllers\Admin\UserManagementController::class, 'suspend']);
+                Route::post('/{user}/unsuspend',    [\App\Http\Controllers\Admin\UserManagementController::class, 'unsuspend']);
+            });
+
+            // Transactions
+            Route::prefix('transactions')->middleware('can:view_transactions,admin')->group(function () {
+                Route::get('/',                         [\App\Http\Controllers\Admin\TransactionMonitorController::class, 'index']);
+                Route::get('/pending-withdrawals',      [\App\Http\Controllers\Admin\TransactionMonitorController::class, 'pendingWithdrawals']);
+                Route::get('/revenue',                  [\App\Http\Controllers\Admin\TransactionMonitorController::class, 'revenue']);
+                Route::get('/{transaction}',            [\App\Http\Controllers\Admin\TransactionMonitorController::class, 'show']);
+                Route::post('/{transaction}/flag',      [\App\Http\Controllers\Admin\TransactionMonitorController::class, 'flag']);
+            });
+
+            // Fraud
+            Route::prefix('fraud')->middleware('can:view_fraud_flags,admin')->group(function () {
+                Route::get('/',                     [\App\Http\Controllers\Admin\FraudController::class, 'index']);
+                Route::get('/{fraudFlag}',          [\App\Http\Controllers\Admin\FraudController::class, 'show']);
+                Route::patch('/{fraudFlag}/resolve',[\App\Http\Controllers\Admin\FraudController::class, 'resolve']);
+                Route::post('/users/{user}/flag',   [\App\Http\Controllers\Admin\FraudController::class, 'flagUser']);
+            });
+
+            // Logs
+            Route::get('/audit-logs',   [\App\Http\Controllers\Admin\LogsController::class, 'auditLogs']);
+            Route::get('/webhook-logs', [\App\Http\Controllers\Admin\LogsController::class, 'webhookLogs']);
+
+            // Admin management — super_admin only
+            Route::prefix('admins')->middleware('role:super_admin')->group(function () {
+                Route::get('/',                     [\App\Http\Controllers\Admin\AdminManagementController::class, 'index']);
+                Route::get('/roles',                [\App\Http\Controllers\Admin\AdminManagementController::class, 'roles']);
+                Route::post('/',                    [\App\Http\Controllers\Admin\AdminManagementController::class, 'store']);
+                Route::patch('/{admin}/role',       [\App\Http\Controllers\Admin\AdminManagementController::class, 'updateRole']);
+                Route::patch('/{admin}/toggle',     [\App\Http\Controllers\Admin\AdminManagementController::class, 'toggleActive']);
+            });
+        });
+    });
 });

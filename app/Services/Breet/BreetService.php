@@ -100,17 +100,6 @@ class BreetService
         return hash_equals($expected, $signature);
     }
 
-    /**
-     * Apply spread to Breet's market rate.
-     * Sell: user gets LESS than market (we keep the difference as spread revenue)
-     * e.g. market = ₦1500, spread 4% → user gets ₦1440 per unit
-     */
-    public function applySpread(float $marketRate, float $spreadPercent = null): float
-    {
-        $spread = $spreadPercent ?? config('payyigi.spread_percent', 4);
-        return round($marketRate * (1 - ($spread / 100)), 2);
-    }
-
     public function calculateNgnOut(float $cryptoAmount, float $rate): float
     {
         return round($cryptoAmount * $rate, 2);
@@ -135,30 +124,42 @@ class BreetService
      *   net_ngn       — what user actually receives in wallet
      *   spread_amount — PayYigi's spread revenue (from rate difference)
      */
+    public function applySpread(float $marketRate, float $spreadPercent): float
+    {
+        return round($marketRate * (1 - ($spreadPercent / 100)), 2);
+    }
+
+    private function getPlatformFeePercent(float $cryptoAmount): float
+    {
+        foreach (config('payyigi.platform_fee_tiers') as $tier) {
+            $meetsMin = $cryptoAmount >= $tier['min'];
+            $meetsMax = is_null($tier['max']) || $cryptoAmount < $tier['max'];
+
+            if ($meetsMin && $meetsMax) {
+                return $tier['percent'];
+            }
+        }
+
+        return 3.5; // fallback
+    }
+
     public function calculateFees(float $cryptoAmount, float $marketRate): array
     {
-        $spreadPercent   = config('payyigi.spread_percent', 4);
-        $platformFeePct  = config('payyigi.platform_fee_percent', 0.5);
-        $breetFeePct     = config('payyigi.breet_fee_percent', 0.5);
-
-        $displayRate  = $this->applySpread($marketRate, $spreadPercent);
-        $grossNgn     = $this->calculateNgnOut($cryptoAmount, $displayRate);
-        $spreadAmount = $this->calculateNgnOut($cryptoAmount, $marketRate) - $grossNgn;
-
-        $platformFee  = round($grossNgn * ($platformFeePct / 100), 2);
-        $breetFee     = round($grossNgn * ($breetFeePct / 100), 2);
-        $totalFee     = round($platformFee + $breetFee, 2);
-        $netNgn       = round($grossNgn - $totalFee, 2);
+        $spreadPercent = $this->getPlatformFeePercent($cryptoAmount);
+        $displayRate   = $this->applySpread($marketRate, $spreadPercent);
+        $grossNgn      = $this->calculateNgnOut($cryptoAmount, $displayRate);
+        $breetFee      = round($grossNgn * (config('payyigi.breet_fee_percent', 0.5) / 100), 2);
+        $netNgn        = round($grossNgn - $breetFee, 2);
+        $spreadAmount  = round($this->calculateNgnOut($cryptoAmount, $marketRate) - $grossNgn, 2);
 
         return [
-            'gross_ngn'     => $grossNgn,
-            'platform_fee'  => $platformFee,
-            'breet_fee'     => $breetFee,
-            'total_fee'     => $totalFee,
-            'net_ngn'       => $netNgn,       // credited to wallet
-            'spread_amount' => $spreadAmount,  // our spread profit
-            'display_rate'  => $displayRate,
-            'market_rate'   => $marketRate,
+            'spread_percent' => $spreadPercent,
+            'display_rate'   => $displayRate,
+            'market_rate'    => $marketRate,
+            'gross_ngn'      => $grossNgn,
+            'breet_fee'      => $breetFee,
+            'net_ngn'        => $netNgn,
+            'spread_amount'  => $spreadAmount,
         ];
     }
 }
