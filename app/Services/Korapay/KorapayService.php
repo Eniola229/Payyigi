@@ -28,17 +28,16 @@ class KorapayService
      */
     public function verifyNin(
         string  $nin,
-        bool    $validateData  = false,
-        ?string $firstName     = null,
-        ?string $lastName      = null,
-        ?string $dateOfBirth   = null,
+        bool    $validateData = false,
+        ?string $firstName    = null,
+        ?string $lastName     = null,
+        ?string $dateOfBirth  = null,
     ): array {
         $payload = [
             'id'                   => $nin,
             'verification_consent' => true,
         ];
 
-        // Optional data matching
         if ($validateData && $firstName && $lastName && $dateOfBirth) {
             $payload['validation'] = [
                 'first_name'    => $firstName,
@@ -71,6 +70,74 @@ class KorapayService
 
         if (!($body['status'] ?? false)) {
             throw new \Exception($body['message'] ?? 'NIN lookup was unsuccessful.');
+        }
+
+        return $body['data'];
+    }
+
+    /**
+     * Verify BVN via Korapay Identity API with facial matching.
+     *
+     * Sends the BVN + a base64 selfie image to Korapay.
+     * Korapay matches the selfie against the photo stored in the CBN database
+     * for that BVN and returns a match boolean + confidence score.
+     *
+     * Optionally validates first_name, last_name, date_of_birth against CBN records.
+     *
+     * Response data includes:
+     *   - data.validation.selfie.match       (bool)
+     *   - data.validation.selfie.confidence  (float 0-1)
+     *   - data.first_name, data.last_name, data.phone_number, etc.
+     *
+     * @throws \Exception on API failure
+     */
+    public function verifyBvn(
+        string  $bvn,
+        string  $selfie,
+        bool    $validateData = true,
+        ?string $firstName    = null,
+        ?string $lastName     = null,
+        ?string $dateOfBirth  = null,
+    ): array {
+        $payload = [
+            'id'                   => $bvn,
+            'verification_consent' => true,
+            'validation'           => [
+                'selfie' => $selfie,
+            ],
+        ];
+
+        // Add data validation fields if provided
+        if ($validateData && $firstName && $lastName && $dateOfBirth) {
+            $payload['validation']['first_name']    = $firstName;
+            $payload['validation']['last_name']     = $lastName;
+            $payload['validation']['date_of_birth'] = $dateOfBirth;
+        }
+
+        $response = Http::withHeaders([
+            'Authorization' => 'Bearer ' . $this->secretKey,
+            'Content-Type'  => 'application/json',
+        ])->post("{$this->baseUrl}/identities/ng/bvn", $payload);
+
+        Log::info('Korapay BVN facial match request', [
+            'bvn_last4'   => substr($bvn, -4),
+            'status_code' => $response->status(),
+        ]);
+
+        if ($response->failed()) {
+            $error = $response->json('message') ?? 'BVN verification failed.';
+            Log::error('Korapay BVN lookup failed', [
+                'bvn_last4' => substr($bvn, -4),
+                'error'     => $error,
+                'response'  => $response->json(),
+            ]);
+            throw new \Exception($error);
+        }
+
+        $body = $response->json();
+
+        if (!($body['status'] ?? false)) {
+            throw new \Exception($body['message'] ?? 'BVN lookup was unsuccessful.');
         }
 
         return $body['data'];

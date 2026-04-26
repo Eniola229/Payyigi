@@ -5,48 +5,39 @@ namespace App\Http\Controllers\User;
 use App\Http\Controllers\Controller;
 use App\Models\AuditLog;
 use App\Models\Transaction;
-use App\Services\Breet\BreetService;
+use App\Services\LocalRamp\LocalRampService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
 class SwapController extends Controller
 {
-    public function __construct(private readonly BreetService $breet) {}
+    public function __construct(private readonly LocalRampService $localRamp) {}
 
     /**
      * GET /api/v1/swap/rate?from=BTC&to=USDT&amount=0.01
-     * Returns how much of the target asset user will receive
      */
     public function getRate(Request $request): JsonResponse
     {
         $request->validate([
-            'from'    => 'required|string|in:BTC,USDT,SOL,ETH,BNB,TRX,XRP,LTC,BCH,USDC,AVAX,TON,DOGE',
-            'to'      => 'required|string|in:BTC,USDT,SOL,ETH,BNB,TRX,XRP,LTC,BCH,USDC,AVAX,TON,DOGE|different:from',
-            'amount'  => 'required|numeric|min:0.000001',
+            'from'   => 'required|string|different:to',
+            'to'     => 'required|string',
+            'amount' => 'required|numeric|min:0.000001',
         ]);
 
         try {
-            // Get NGN value of the FROM asset
-            $fromRate   = (float) $this->breet->getRate($request->from)['rate'];
-            $toRate     = (float) $this->breet->getRate($request->to)['rate'];
-            $spreadPct  = config('payyigi.spread_percent', 4);
-
-            $ngnValue   = (float) $request->amount * $fromRate;
-            // Apply spread twice (once selling from, once buying to)
-            $ngnAfterSpread = $ngnValue * (1 - ($spreadPct / 100));
-            $toAmount   = round($ngnAfterSpread / $toRate, 8);
+            $rateData  = $this->localRamp->getSwapRate($request->from, $request->to);
+            $rate      = (float) $rateData['rate']['amount'];
+            $toAmount  = round((float) $request->amount * $rate, 8);
 
             return response()->json([
                 'data' => [
-                    'from'           => strtoupper($request->from),
-                    'to'             => strtoupper($request->to),
-                    'from_amount'    => (float) $request->amount,
-                    'to_amount'      => $toAmount,
-                    'from_rate_ngn'  => $fromRate,
-                    'to_rate_ngn'    => $toRate,
-                    'spread_percent' => $spreadPct,
-                    'rate_valid_for' => config('payyigi.rate_lock_seconds', 60) . ' seconds',
+                    'from'        => strtoupper($request->from),
+                    'to'          => strtoupper($request->to),
+                    'from_amount' => (float) $request->amount,
+                    'to_amount'   => $toAmount,
+                    'rate'        => $rate,
+                    'note'        => 'Swap rates are not locked. Final amount may vary slightly.',
                 ],
             ]);
         } catch (\Exception $e) {
@@ -56,79 +47,54 @@ class SwapController extends Controller
 
     /**
      * POST /api/v1/swap
-     * Swap from_asset to to_asset. User provides wallet address for to_asset.
-     * Flow: user sends from_asset crypto → Breet converts → sends to_asset to user's address
+     * Swaps between currencies in YOUR LocalRamp wallet.
      */
     public function initiate(Request $request): JsonResponse
     {
         $request->validate([
-            'from'           => 'required|string|in:BTC,USDT,SOL,ETH,BNB,TRX,XRP,LTC,BCH,USDC,AVAX,TON,DOGE',
-            'from_network'   => 'required|string',
-            'to'             => 'required|string|in:BTC,USDT,SOL,ETH,BNB,TRX,XRP,LTC,BCH,USDC,AVAX,TON,DOGE|different:from',
-            'to_network'     => 'required|string',
-            'amount'         => 'required|numeric|min:0.000001',
-            'wallet_address' => 'required|string|min:10|max:200', // destination wallet for to_asset
+            'from'   => 'required|string|different:to',
+            'to'     => 'required|string',
+            'amount' => 'required|numeric|min:0.000001',
         ]);
 
         $user = $request->user();
 
         try {
-            $fromRate      = (float) $this->breet->getRate($request->from)['rate'];
-            $toRate        = (float) $this->breet->getRate($request->to)['rate'];
-            $spreadPct     = config('payyigi.spread_percent', 4);
-            $fromAmount    = (float) $request->amount;
-            $ngnValue      = $fromAmount * $fromRate;
-            $ngnAfterSpread= $ngnValue * (1 - ($spreadPct / 100));
-            $toAmount      = round($ngnAfterSpread / $toRate, 8);
-            $spreadAmt     = round($ngnValue - $ngnAfterSpread, 2);
+            $rateData  = $this->localRamp->getSwapRate($request->from, $request->to);
+            $rate      = (float) $rateData['rate']['amount'];
+            $fromAmt   = (float) $request->amount;
+            $toAmt     = round($fromAmt * $rate, 8);
 
-            $transaction = DB::transaction(function () use (
-                $user, $request, $fromAmount, $toAmount,
-                $fromRate, $toRate, $ngnValue, $spreadAmt
-            ) {
+            $transaction = DB::transaction(function () use ($user, $request, $fromAmt, $toAmt, $rate) {
                 $txn = Transaction::create([
                     'user_id'        => $user->id,
                     'wallet_id'      => $user->wallet->id,
                     'type'           => 'swap',
                     'entry_type'     => 'debit',
                     'currency'       => 'NGN',
-                    'amount'         => $ngnValue, // NGN equivalent for records
-                    'net_amount'     => $ngnValue,
-                    'spread_amount'  => $spreadAmt,
+                    'amount'         => 0, // swap is crypto-to-crypto, no NGN
+                    'net_amount'     => 0,
                     'crypto_asset'   => strtoupper($request->from),
-                    'crypto_network' => $request->from_network,
-                    'crypto_amount'  => $fromAmount,
+                    'crypto_amount'  => $fromAmt,
                     'swap_to_asset'  => strtoupper($request->to),
-                    'swap_to_amount' => $toAmount,
-                    'rate'           => $fromRate,
-                    'deposit_address'=> $request->wallet_address,
-                    'status'         => 'awaiting_crypto',
+                    'swap_to_amount' => $toAmt,
+                    'rate'           => $rate,
+                    'status'         => 'processing',
                     'session_id'     => session()->getId(),
                     'ip_address'     => request()->ip(),
                     'user_agent'     => request()->userAgent(),
-                    'rate_locked_at' => now(),
-                    'rate_expires_at'=> now()->addSeconds(config('payyigi.rate_lock_seconds', 60)),
-                    'metadata'       => [
-                        'to_network' => $request->to_network,
-                        'to_rate'    => $toRate,
-                    ],
                 ]);
 
-                // Create sell order on Breet for the FROM asset
-                // Breet will handle conversion and send TO asset to wallet_address
-                $breetOrder = app(BreetService::class)->createSellOrder(
-                    asset:       $request->from,
-                    network:     $request->from_network,
-                    amount:      $fromAmount,
-                    bankAccount: [], // swap doesn't need bank account — future Breet swap API
-                    reference:   $txn->reference,
+                // Call LocalRamp to initiate swap
+                $swapData = app(LocalRampService::class)->initiateSwap(
+                    fromCurrency: $request->from,
+                    toCurrency:   $request->to,
+                    fromAmount:   $fromAmt,
                 );
 
                 $txn->update([
-                    'breet_order_id'  => $breetOrder['id']        ?? null,
-                    'breet_reference' => $breetOrder['reference'] ?? null,
-                    'deposit_address' => $breetOrder['address']   ?? $request->wallet_address,
-                    'breet_response'  => $breetOrder,
+                    'breet_order_id' => $swapData['reference'] ?? null,
+                    'breet_response' => $swapData,
                 ]);
 
                 return $txn;
@@ -140,18 +106,15 @@ class SwapController extends Controller
             ]);
 
             return response()->json([
-                'message' => 'Send your crypto to the address below to complete the swap.',
+                'message' => 'Swap initiated successfully.',
                 'data'    => [
-                    'reference'       => $transaction->reference,
-                    'from'            => $transaction->crypto_asset,
-                    'from_network'    => $transaction->crypto_network,
-                    'amount_to_send'  => $transaction->crypto_amount,
-                    'deposit_address' => $transaction->deposit_address,
-                    'to'              => $transaction->swap_to_asset,
-                    'to_amount'       => $transaction->swap_to_amount,
-                    'destination_wallet' => $request->wallet_address,
-                    'status'          => $transaction->status,
-                    'expires_at'      => $transaction->rate_expires_at,
+                    'reference'  => $transaction->reference,
+                    'from'       => $transaction->crypto_asset,
+                    'from_amount'=> $transaction->crypto_amount,
+                    'to'         => $transaction->swap_to_asset,
+                    'to_amount'  => $transaction->swap_to_amount,
+                    'rate'       => $transaction->rate,
+                    'status'     => $transaction->status,
                 ],
             ], 201);
 

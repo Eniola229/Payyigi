@@ -6,7 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\AuditLog;
 use App\Models\OtpCode;
 use App\Services\Korapay\KorapayService;
-use App\Services\Twilio\TwilioService;
+use App\Services\Termii\TermiiService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
@@ -17,17 +17,17 @@ class NinVerificationController extends Controller
 {
     public function __construct(
         private readonly KorapayService $korapay,
-        private readonly TwilioService  $twilio,
+        private readonly TermiiService  $termii,
     ) {}
 
-    /**
+    /** 
      * STEP 1 — User submits their NIN.
      *
      * Flow:
      * 1. Call Korapay NIN Lookup API with the NIN
      * 2. Korapay returns the phone_number registered to that NIN in the NIMC database
      * 3. We cache that NIN-linked phone temporarily
-     * 4. We send a 6-digit OTP via Twilio SMS to that NIN-linked phone
+     * 4. We send a 6-digit OTP via termii SMS to that NIN-linked phone
      * 5. Return a masked version of the phone to the user so they know where to look
      *
      * This ensures only the real NIN owner can verify — they must receive the OTP
@@ -126,8 +126,8 @@ class NinVerificationController extends Controller
             'expires_at' => now()->addMinutes(10),
         ]);
 
-        // ── Step 5: Send OTP via Twilio to the NIN-linked phone ───────────────
-        $sent = $this->twilio->sendSms(
+        // ── Step 5: Send OTP via termii to the NIN-linked phone ───────────────
+        $sent = $this->termii->sendSms(
             $ninPhone,
             "Your PayYigi NIN verification code is: {$code}. Valid for 10 minutes. Do not share this with anyone."
         );
@@ -290,7 +290,7 @@ class NinVerificationController extends Controller
             'expires_at' => now()->addMinutes(10),
         ]);
 
-        $this->twilio->sendSms(
+        $this->termii->sendSms(
             $ninPhone,
             "Your PayYigi NIN verification code is: {$code}. Valid for 10 minutes. Do not share this with anyone."
         );

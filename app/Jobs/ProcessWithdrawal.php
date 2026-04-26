@@ -4,7 +4,7 @@ namespace App\Jobs;
 
 use App\Models\AuditLog;
 use App\Models\Transaction;
-use App\Services\Breet\BreetService;
+use App\Services\Korapay\KorapayPayoutService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -18,92 +18,127 @@ class ProcessWithdrawal implements ShouldQueue
 
     public int $tries   = 3;
     public int $timeout = 60;
+    public int $backoff = 30; // seconds between retries
 
     public function __construct(private readonly Transaction $transaction) {}
 
-    public function handle(BreetService $breet): void
+    public function handle(KorapayPayoutService $korapay): void
     {
         $txn = $this->transaction->fresh();
 
-        if (!$txn || $txn->isCompleted() || $txn->isFailed()) {
-            return;
-        }
+        if (!$txn || $txn->isCompleted() || $txn->isFailed()) return;
 
         try {
-            // Initiate payout via Breet
-            // NOTE: Exact Breet payout API endpoint — update to match Breet docs
-            $response = \Illuminate\Support\Facades\Http::withHeaders([
-                'Authorization' => 'Bearer ' . config('services.breet.api_key'),
-                'Content-Type'  => 'application/json',
-            ])->post(config('services.breet.base_url') . '/payouts', [
-                'amount'         => $txn->amount,
-                'currency'       => 'NGN',
-                'bank_code'      => $txn->bank_code,
-                'account_number' => $txn->account_number,
-                'account_name'   => $txn->account_name,
-                'reference'      => $txn->reference,
-                'narration'      => "PayYigi withdrawal - {$txn->reference}",
+            $data = $korapay->disburse(
+                reference:     $txn->reference,
+                amount:        (float) $txn->amount,
+                bankCode:      $txn->bank_code,
+                accountNumber: $txn->account_number,
+                accountName:   $txn->account_name,
+                customerEmail: $txn->user->email,
+                narration:     "PayYigi Withdrawal - {$txn->reference}",
+            );
+
+            // Korapay returns status: "processing" immediately
+            // Completion confirmed via webhook (transfer.success / transfer.failed)
+            $txn->update([
+                'status'                  => 'processing',
+                'bank_transfer_reference' => $data['reference'] ?? null,
+                'provider_response'          => $data,
             ]);
 
-            if ($response->successful()) {
-                $data = $response->json('data');
+            Log::info('Korapay withdrawal initiated', [
+                'reference'       => $txn->reference,
+                'korapay_ref'     => $data['reference'] ?? null,
+            ]);
 
-                $txn->update([
-                    'status'                  => 'completed',
-                    'completed_at'            => now(),
-                    'bank_transfer_reference' => $data['reference'] ?? null,
-                    'breet_reference'         => $data['id']        ?? null,
-                ]);
+        } catch (\RuntimeException $e) {
+            // Server error (5xx) — verify before acting
+            $message = $e->getMessage();
 
-                $txn->user->notify(new \App\Notifications\WithdrawalCompletedNotification($txn));
-
-                AuditLog::record('transaction.withdrawal_completed', [
-                    'user_id'        => $txn->user_id,
-                    'auditable_type' => Transaction::class,
-                    'auditable_id'   => $txn->id,
-                ]);
-
-            } else {
-                throw new \Exception($response->json('message') ?? 'Payout failed.');
+            if (str_starts_with($message, 'server_error:')) {
+                $this->verifyBeforeActing($korapay, $txn);
+                return;
             }
 
+            $this->handleFailure($txn, $message);
+
         } catch (\Exception $e) {
-            Log::error('ProcessWithdrawal job failed', [
-                'transaction_id' => $txn->id,
-                'error'          => $e->getMessage(),
-                'attempt'        => $this->attempts(),
+            Log::error('ProcessWithdrawal failed', [
+                'reference' => $txn->reference,
+                'error'     => $e->getMessage(),
+                'attempt'   => $this->attempts(),
             ]);
 
             if ($this->attempts() >= $this->tries) {
-                // Final failure — refund wallet
-                $txn->update([
-                    'status'         => 'failed',
-                    'failed_at'      => now(),
-                    'failure_reason' => $e->getMessage(),
-                ]);
-
-                $txn->wallet->credit((float) $txn->amount);
-
-                $txn->user->notify(new \App\Notifications\WithdrawalFailedNotification($txn));
-
-                AuditLog::record('transaction.withdrawal_failed', [
-                    'user_id'        => $txn->user_id,
-                    'auditable_type' => Transaction::class,
-                    'auditable_id'   => $txn->id,
-                    'new_values'     => ['error' => $e->getMessage()],
-                ]);
+                $this->handleFailure($txn, $e->getMessage());
             } else {
-                // Retry after delay
-                $this->release(now()->addMinutes(2));
+                $this->release($this->backoff);
             }
         }
     }
 
-    public function failed(\Throwable $exception): void
+    /**
+     * On 5xx errors, verify payout status before retrying or refunding.
+     * Korapay docs: never treat 5xx as failed without verifying first.
+     */
+    private function verifyBeforeActing(KorapayPayoutService $korapay, Transaction $txn): void
     {
-        Log::error('ProcessWithdrawal job permanently failed', [
-            'transaction_id' => $this->transaction->id,
-            'error'          => $exception->getMessage(),
+        try {
+            $status = $korapay->getPayoutStatus($txn->reference);
+            $state  = $status['status'] ?? null;
+
+            if ($state === 'success') {
+                // Already processed — mark completed, don't retry
+                $txn->update([
+                    'status'       => 'completed',
+                    'completed_at' => now(),
+                ]);
+                $txn->user->notify(new \App\Notifications\WithdrawalCompletedNotification($txn));
+            } elseif ($state === 'failed') {
+                $this->handleFailure($txn, 'Payout failed on Korapay.');
+            } else {
+                // Still processing — release for retry
+                $this->release($this->backoff);
+            }
+        } catch (\Exception $e) {
+            // Can't verify — retry
+            $this->release($this->backoff);
+        }
+    }
+
+    /**
+     * Final failure — refund wallet and notify user.
+     */
+    private function handleFailure(Transaction $txn, string $reason): void
+    {
+        $txn->update([
+            'status'         => 'failed',
+            'failed_at'      => now(),
+            'failure_reason' => $reason,
         ]);
+
+        // Refund wallet
+        $txn->wallet->credit((float) $txn->amount);
+
+        $txn->user->notify(new \App\Notifications\WithdrawalFailedNotification($txn));
+
+        AuditLog::record('transaction.withdrawal_failed', [
+            'user_id'        => $txn->user_id,
+            'auditable_type' => Transaction::class,
+            'auditable_id'   => $txn->id,
+            'new_values'     => ['error' => $reason],
+        ]);
+
+        Log::error('Withdrawal permanently failed — wallet refunded', [
+            'reference' => $txn->reference,
+            'reason'    => $reason,
+        ]);
+    }
+
+    public function failed(\Throwable $e): void
+    {
+        $txn = $this->transaction->fresh();
+        if ($txn) $this->handleFailure($txn, $e->getMessage());
     }
 }

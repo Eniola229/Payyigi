@@ -3,6 +3,7 @@
 use App\Http\Controllers\Auth\EmailVerificationController;
 use App\Http\Controllers\Auth\LoginController;
 use App\Http\Controllers\Auth\NinVerificationController;
+use App\Http\Controllers\Auth\BvnVerificationController;
 use App\Http\Controllers\Auth\PasswordController;
 use App\Http\Controllers\Auth\RegisterController;
 use App\Http\Controllers\Auth\TwoFactorController;
@@ -15,8 +16,8 @@ use App\Http\Controllers\User\WithdrawController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
-// ── Webhooks (no auth — verified via HMAC) ───────────────────────────────────
-Route::post('/webhooks/breet', [BreetWebhookController::class, 'handle']);
+// ── Webhooks (no auth) ───────────────────────────────────
+Route::post('/webhooks/korapay', [\App\Http\Controllers\KorapayWebhookController::class, 'handle']);
 
 // ── Public Auth ──────────────────────────────────────────────────────────────
 Route::prefix('auth')->group(function () {
@@ -66,6 +67,13 @@ Route::middleware(['auth:sanctum', 'account.active'])->group(function () {
             $d->delete();
             return response()->json(['message' => 'Device removed.']);
         });
+    });
+
+ 
+    // BVN Verification
+    Route::prefix('verification/bvn')->group(function () {
+        Route::post('/verify', [BvnVerificationController::class, 'verify'])
+             ->middleware('throttle:3,30'); // 3 attempts per 30 min — matches controller throttle
     });
 
     // NIN Verification
@@ -199,4 +207,4 @@ Route::middleware(['auth:sanctum', 'account.active'])->group(function () {
             });
         });
     });
-});
+}); 

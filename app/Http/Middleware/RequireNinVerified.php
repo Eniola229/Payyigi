@@ -14,14 +14,14 @@ class RequireNinVerified
     public function handle(Request $request, Closure $next): Response
     {
         $user = $request->user();
-
-        if (!$user->nin_verified) {
+ 
+        if (!$user->nin_verified && !$user->bvn_verified) {
             return response()->json([
-                'message' => 'Please verify your NIN to access this feature.',
-                'action'  => 'verify_nin',
+                'message' => 'Identity verification required. Please verify your NIN or BVN to access this feature.',
+                'error'   => 'identity_verification_required',
             ], 403);
         }
-
+ 
         return $next($request);
     }
 }

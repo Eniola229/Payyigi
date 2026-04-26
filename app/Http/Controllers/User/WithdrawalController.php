@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\AuditLog;
 use App\Models\Transaction;
 use App\Services\WalletService;
+use App\Jobs\ProcessWithdrawal;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -15,10 +16,9 @@ class WithdrawController extends Controller
     public function __construct(private readonly WalletService $walletService) {}
 
     /**
-     * Initiate a withdrawal — deducts from wallet, dispatches payout job
-     *
      * POST /api/v1/withdraw
-     * Middleware: auth:sanctum, account.active, nin.verified, kyc:basic, txn.pin
+     * Deducts wallet immediately, dispatches job to send via Korapay instantly.
+     * No admin approval needed — fully automatic.
      */
     public function initiate(Request $request): JsonResponse
     {
@@ -32,37 +32,30 @@ class WithdrawController extends Controller
         $wallet      = $user->wallet;
         $bankAccount = $user->bankAccounts()->findOrFail($request->bank_account_id);
 
-        if (!$bankAccount->is_verified) {
-            return response()->json(['message' => 'Bank account is not verified.'], 422);
-        }
-
-        // Check available balance
         if (!$wallet->hasSufficientBalance($amount)) {
             return response()->json([
-                'message'           => 'Insufficient balance.',
+                'message'           => 'Insufficient wallet balance.',
                 'available_balance' => $wallet->getAvailableBalance(),
             ], 422);
         }
 
-        // Check daily withdrawal limit
+        // Check daily limit
         if ($this->walletService->hasExceededDailyLimit(
-            $user->id,
-            $amount,
-            $user->dailyWithdrawalLimit()
+            $user->id, $amount, $user->dailyWithdrawalLimit() * 100
         )) {
             return response()->json([
-                'message' => 'This withdrawal would exceed your daily limit. Please complete Advanced KYC to increase your limit.',
-                'limit'   => number_format($user->dailyWithdrawalLimit() / 100),
+                'message' => 'Daily withdrawal limit exceeded.',
+                'limit'   => '₦' . number_format($user->dailyWithdrawalLimit()),
             ], 422);
         }
 
         try {
             $transaction = DB::transaction(function () use ($user, $wallet, $amount, $bankAccount, $request) {
-                // Deduct from wallet immediately
+                // Deduct from wallet immediately — funds are reserved
                 $balanceBefore = (float) $wallet->balance;
                 $wallet->debit($amount);
 
-                $transaction = Transaction::create([
+                return Transaction::create([
                     'user_id'        => $user->id,
                     'wallet_id'      => $wallet->id,
                     'type'           => 'withdraw',
@@ -83,12 +76,10 @@ class WithdrawController extends Controller
                     'ip_address'     => request()->ip(),
                     'user_agent'     => request()->userAgent(),
                 ]);
-
-                // Dispatch background job to process the payout via Breet
-                \App\Jobs\ProcessWithdrawal::dispatch($transaction);
-
-                return $transaction;
             });
+
+            // Dispatch immediately — no delay, no admin needed
+            ProcessWithdrawal::dispatch($transaction);
 
             AuditLog::record('transaction.withdrawal_initiated', [
                 'user_id'        => $user->id,
@@ -118,18 +109,12 @@ class WithdrawController extends Controller
         }
     }
 
-    /**
-     * Withdrawal history
-     * GET /api/v1/withdraw/history
-     */
     public function history(Request $request): JsonResponse
     {
-        $transactions = $request->user()
-            ->transactions()
-            ->where('type', 'withdraw')
-            ->latest()
-            ->paginate(20);
-
-        return response()->json(['data' => $transactions]);
+        return response()->json([
+            'data' => $request->user()->transactions()
+                ->where('type', 'withdraw')
+                ->latest()->paginate(20),
+        ]);
     }
 }
