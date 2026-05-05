@@ -18,6 +18,7 @@ use Illuminate\Support\Facades\Route;
 
 // ── Webhooks (no auth) ───────────────────────────────────
 Route::post('/webhooks/korapay', [\App\Http\Controllers\KorapayWebhookController::class, 'handle']);
+Route::post('/webhooks/breet', [\App\Http\Controllers\BreetWebhookController::class, 'handle']);
 
 // ── Public Auth ──────────────────────────────────────────────────────────────
 Route::prefix('auth')->group(function () {
@@ -81,6 +82,12 @@ Route::middleware(['auth:sanctum', 'account.active'])->group(function () {
         Route::post('/initiate', [NinVerificationController::class, 'initiateVerification'])->middleware('throttle:3,15');
         Route::post('/confirm',  [NinVerificationController::class, 'confirmVerification'])->middleware('throttle:5,15');
         Route::post('/resend',   [NinVerificationController::class, 'resendOtp'])->middleware('throttle:2,10');
+    });
+
+    // Virtual account
+    Route::prefix('wallet')->group(function () {
+        Route::post('/virtual-account/generate', [\App\Http\Controllers\User\VirtualAccountController::class, 'generate']);
+        Route::get('/virtual-account',           [\App\Http\Controllers\User\VirtualAccountController::class, 'show']);
     });
 
     // Profile & Wallet

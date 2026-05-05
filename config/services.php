@@ -53,6 +53,11 @@ return [
         'base_url'    => env('LOCALRAMP_BASE_URL', 'https://api.localramp.co/v1'),
     ],
 
+    'breet' => [
+        'api_key'        => env('BREET_API_KEY'),
+        'base_url'       => env('BREET_BASE_URL', 'https://api.breet.io/v1'),
+        'webhook_secret' => env('BREET_WEBHOOK_SECRET'),
+    ],
     'company_account_number' => env('COMPANY_ACCOUNT_NUMBER'),
     'company_bank_code'      => env('COMPANY_BANK_CODE'),
     'company_account_name'   => env('COMPANY_ACCOUNT_NAME'),

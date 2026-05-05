@@ -10,6 +10,7 @@ use App\Services\Termii\TermiiService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\RateLimiter;
 
@@ -20,18 +21,17 @@ class NinVerificationController extends Controller
         private readonly TermiiService  $termii,
     ) {}
 
-    /** 
+    /**
      * STEP 1 — User submits their NIN.
      *
      * Flow:
      * 1. Call Korapay NIN Lookup API with the NIN
      * 2. Korapay returns the phone_number registered to that NIN in the NIMC database
      * 3. We cache that NIN-linked phone temporarily
-     * 4. We send a 6-digit OTP via termii SMS to that NIN-linked phone
-     * 5. Return a masked version of the phone to the user so they know where to look
-     *
-     * This ensures only the real NIN owner can verify — they must receive the OTP
-     * on the phone NIMC has on record for that NIN.
+     * 4. We trigger a voice OTP call via Termii to that NIN-linked phone
+     *    (Termii generates the PIN and calls the number to read it aloud)
+     * 5. We store the returned pin_id for later verification
+     * 6. Return a masked version of the phone to the user
      */
     public function initiateVerification(Request $request): JsonResponse
     {
@@ -45,7 +45,6 @@ class NinVerificationController extends Controller
             return response()->json(['message' => 'NIN already verified.'], 422);
         }
 
-        // ── Throttle: max 3 attempts per 15 minutes ──────────────────────────
         $throttleKey = "nin_initiate:{$user->id}";
         if (RateLimiter::tooManyAttempts($throttleKey, 3)) {
             $seconds = RateLimiter::availableIn($throttleKey);
@@ -76,17 +75,12 @@ class NinVerificationController extends Controller
         }
 
         // ── Step 2: Extract phone from Korapay response ───────────────────────
-        // Korapay returns the phone_number registered to this NIN in the NIMC DB.
-        // We send OTP to THIS number — not the user's registered phone.
-        // This proves the person submitting the NIN actually owns it.
         $ninPhone = $ninData['phone_number'] ?? null;
 
         Log::info('NIN lookup phone number', [
-            'user_id' => $user->id,
-            'nin_last4' => substr($request->nin, -4),
-            'returned_phone' => $ninPhone,
+            'user_id'              => $user->id,
+            'nin_last4'            => substr($request->nin, -4),
             'returned_phone_last4' => $ninPhone ? substr($ninPhone, -4) : 'null',
-            'full_nin_data' => $ninData // This will show everything Korapay returned
         ]);
 
         if (!$ninPhone) {
@@ -109,34 +103,33 @@ class NinVerificationController extends Controller
             ],
         ], now()->addMinutes(15));
 
-        // ── Step 4: Generate OTP and save to DB ───────────────────────────────
+        // ── Step 4: Trigger voice OTP via Termii ──────────────────────────────
+        // Termii generates the PIN and calls the number to read it aloud.
+        // We get back a pin_id which is used to verify what the user enters.
+        $result = $this->termii->sendVoiceToken($ninPhone);
+
+        if (!$result['success']) {
+            return response()->json([
+                'message' => 'Failed to send verification call. Please try again.',
+            ], 500);
+        }
+
+        // ── Step 5: Store pin_id for verification ─────────────────────────────
+        // We no longer store the code locally — Termii owns the PIN.
+        // We store pin_id in OtpCode.code field (or you can add a pin_id column).
         OtpCode::where('user_id', $user->id)
                ->where('purpose', 'nin_verification')
                ->where('used', false)
                ->update(['used' => true]);
 
-        $code = str_pad(random_int(0, 999999), 6, '0', STR_PAD_LEFT);
-
         OtpCode::create([
             'user_id'    => $user->id,
-            'code'       => $code,
+            'code'       => $result['pin_id'], // stores Termii pin_id, not the actual PIN
             'phone'      => $ninPhone,
             'purpose'    => 'nin_verification',
             'ip_address' => $request->ip(),
             'expires_at' => now()->addMinutes(10),
         ]);
-
-        // ── Step 5: Send OTP via termii to the NIN-linked phone ───────────────
-        $sent = $this->termii->sendSms(
-            $ninPhone,
-            "Your PayYigi NIN verification code is: {$code}. Valid for 10 minutes. Do not share this with anyone."
-        );
-
-        if (!$sent) {
-            return response()->json([
-                'message' => 'Failed to send verification code. Please try again.',
-            ], 500);
-        }
 
         AuditLog::record('user.nin_verification_initiated', [
             'user_id'    => $user->id,
@@ -148,7 +141,7 @@ class NinVerificationController extends Controller
         ]);
 
         return response()->json([
-            'message' => 'A verification code has been sent to the phone number registered to your NIN.',
+            'message' => 'A verification code will be read to you via phone call on the number registered to your NIN.',
             'data'    => [
                 'phone_hint' => $this->maskPhone($ninPhone),
             ],
@@ -156,7 +149,8 @@ class NinVerificationController extends Controller
     }
 
     /**
-     * STEP 2 — User submits the OTP received on their NIN-linked phone.
+     * STEP 2 — User submits the PIN they heard on the voice call.
+     * We verify it against Termii's Verify Token API using the stored pin_id.
      */
     public function confirmVerification(Request $request): JsonResponse
     {
@@ -179,7 +173,6 @@ class NinVerificationController extends Controller
         }
         RateLimiter::hit($throttleKey, 60 * 15);
 
-        // Retrieve cached NIN session
         $cached = Cache::get("nin_verification:{$user->id}");
 
         if (!$cached) {
@@ -188,7 +181,7 @@ class NinVerificationController extends Controller
             ], 422);
         }
 
-        // Validate OTP
+        // Retrieve the stored pin_id
         $otp = OtpCode::where('user_id', $user->id)
                       ->where('purpose', 'nin_verification')
                       ->valid()
@@ -201,7 +194,10 @@ class NinVerificationController extends Controller
             ], 422);
         }
 
-        if ($otp->code !== $request->code) {
+        // ── Verify against Termii's API (not a local comparison) ─────────────
+        $verified = $this->termii->verifyToken($otp->code, $request->code);
+
+        if (!$verified) {
             $otp->incrementAttempts();
             $remaining = max(0, 3 - $otp->fresh()->attempts);
 
@@ -216,12 +212,12 @@ class NinVerificationController extends Controller
             ], 422);
         }
 
-        // ✅ OTP correct — verify the NIN
+        // PIN correct — verify the NIN
         $otp->markUsed();
         RateLimiter::clear($throttleKey);
 
         $user->update([
-            'nin'             => $cached['nin'],       // auto-encrypted via cast
+            'nin'             => $cached['nin'],
             'nin_verified'    => true,
             'nin_verified_at' => now(),
             'nin_phone'       => $cached['nin_phone'],
@@ -245,7 +241,7 @@ class NinVerificationController extends Controller
     }
 
     /**
-     * Resend OTP (max 2 times per 10 minutes)
+     * Resend OTP — triggers a new voice call (max 2 times per 10 minutes)
      */
     public function resendOtp(Request $request): JsonResponse
     {
@@ -259,7 +255,7 @@ class NinVerificationController extends Controller
         if (RateLimiter::tooManyAttempts($throttleKey, 2)) {
             $seconds = RateLimiter::availableIn($throttleKey);
             return response()->json([
-                'message' => "Please wait {$seconds} seconds before requesting another code.",
+                'message' => "Please wait {$seconds} seconds before requesting another call.",
             ], 429);
         }
         RateLimiter::hit($throttleKey, 60 * 10);
@@ -279,24 +275,25 @@ class NinVerificationController extends Controller
                ->where('used', false)
                ->update(['used' => true]);
 
-        $code = str_pad(random_int(0, 999999), 6, '0', STR_PAD_LEFT);
+        $result = $this->termii->sendVoiceToken($ninPhone);
+
+        if (!$result['success']) {
+            return response()->json([
+                'message' => 'Failed to send verification call. Please try again.',
+            ], 500);
+        }
 
         OtpCode::create([
             'user_id'    => $user->id,
-            'code'       => $code,
+            'code'       => $result['pin_id'],
             'phone'      => $ninPhone,
             'purpose'    => 'nin_verification',
             'ip_address' => $request->ip(),
             'expires_at' => now()->addMinutes(10),
         ]);
 
-        $this->termii->sendSms(
-            $ninPhone,
-            "Your PayYigi NIN verification code is: {$code}. Valid for 10 minutes. Do not share this with anyone."
-        );
-
         return response()->json([
-            'message'    => 'A new code has been sent.',
+            'message'    => 'A new verification call is being placed.',
             'phone_hint' => $this->maskPhone($ninPhone),
         ]);
     }

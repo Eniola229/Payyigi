@@ -60,6 +60,10 @@ return Application::configure(basePath: dirname(__DIR__))
             }
         });
 
+        $exceptions->render(function (\Symfony\Component\HttpKernel\Exception\NotFoundHttpException $e, Request $request) {
+            return response()->json(['message' => 'Resource not found.'], 404);
+        });
+
         $exceptions->render(function (\Illuminate\Validation\ValidationException $e, Request $request) {
             if ($request->expectsJson() || $request->is('api/*')) {
                 return response()->json([

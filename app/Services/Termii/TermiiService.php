@@ -1,88 +1,130 @@
 <?php
-
 namespace App\Services\Termii;
-
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
 class TermiiService
 {
     private string $apiKey;
-    private string $senderId;
     private string $baseUrl;
-    private string $channel;
 
     public function __construct()
     {
-        $this->apiKey   = config('services.termii.api_key');
-        $this->senderId = config('services.termii.sender_id');
-        $this->baseUrl  = config('services.termii.base_url');
-        $this->channel  = config('services.termii.channel', 'dnd');
+        $this->apiKey  = config('services.termii.api_key');
+        $this->baseUrl = config('services.termii.base_url');
     }
 
     /**
-     * Send a plain SMS message.
-     * Uses DND (transactional) channel — ensures delivery even to DND numbers.
-     * This is required for OTPs and security codes.
+     * Send an OTP via voice call.
+     * Termii generates the PIN internally and reads it aloud to the recipient.
+     * Verify the PIN afterwards using the Termii Verify Token API.
      *
-     * POST /api/sms/send
+     * POST /api/sms/otp/send/voice
+     *
+     * @return array{success: bool, pin_id: string|null}
      */
-    public function sendSms(string $phone, string $message): bool
-    {
+    public function sendVoiceToken(
+        string $phone,
+        int $pinLength      = 6,
+        int $pinAttempts    = 3,
+        int $pinTtlMinutes  = 5
+    ): array {
         try {
-            $response = Http::post("{$this->baseUrl}/sms/send", [
-                'api_key'  => $this->apiKey,
-                'to'       => $this->formatPhone($phone),
-                'from'     => $this->senderId,
-                'sms'      => $message,
-                'type'     => 'plain',
-                'channel'  => $this->channel,
+            $response = Http::post("{$this->baseUrl}/sms/otp/send/voice", [
+                'api_key'           => $this->apiKey,
+                'phone_number'      => $this->formatPhone($phone),
+                'pin_length'        => $pinLength,
+                'pin_attempts'      => $pinAttempts,
+                'pin_time_to_live'  => $pinTtlMinutes,
             ]);
 
             $body = $response->json();
 
             if (($body['code'] ?? '') === 'ok') {
-                Log::info('Termii SMS sent', [
+                Log::info('Termii voice token sent', [
                     'phone_last4' => substr($phone, -4),
                     'message_id'  => $body['message_id'] ?? null,
+                    'pin_id'      => $body['pinId'] ?? null,
                 ]);
-                return true;
+
+                return [
+                    'success' => true,
+                    'pin_id'  => $body['pinId'] ?? null,
+                ];
             }
 
-            Log::error('Termii SMS failed', [
+            Log::error('Termii voice token failed', [
                 'phone_last4' => substr($phone, -4),
                 'response'    => $body,
             ]);
-            return false;
+
+            return ['success' => false, 'pin_id' => null];
 
         } catch (\Exception $e) {
-            Log::error('Termii SMS exception', [
+            Log::error('Termii voice token exception', [
                 'phone_last4' => substr($phone, -4),
                 'error'       => $e->getMessage(),
             ]);
-            return false;
+
+            return ['success' => false, 'pin_id' => null];
         }
     }
 
     /**
-     * Format phone to E.164 Nigeria format.
-     * Termii accepts numbers with country code, no + prefix.
+     * Format phone to E.164 Nigeria format (no + prefix).
      * e.g. 08012345678 → 2348012345678
      */
     private function formatPhone(string $phone): string
     {
         $digits = preg_replace('/\D/', '', $phone);
 
-        // 0XXXXXXXXXX → 234XXXXXXXXXX
         if (str_starts_with($digits, '0') && strlen($digits) === 11) {
             return '234' . substr($digits, 1);
         }
 
-        // Already has 234
         if (str_starts_with($digits, '234')) {
             return $digits;
         }
 
         return $digits;
+    }
+
+    /**
+     * Verify a voice OTP PIN against Termii's API.
+     * POST /api/sms/otp/verify
+     *
+     * @param string $pinId   The pin_id returned from sendVoiceToken()
+     * @param string $pin     The code the user entered
+     */
+    public function verifyToken(string $pinId, string $pin): bool
+    {
+        try {
+            $response = Http::post("{$this->baseUrl}/sms/otp/verify", [
+                'api_key' => $this->apiKey,
+                'pin_id'  => $pinId,
+                'pin'     => $pin,
+            ]);
+
+            $body = $response->json();
+
+            $verified = ($body['verified'] ?? false) === true
+                     || ($body['verified'] ?? '') === 'True';
+
+            Log::info('Termii token verification', [
+                'pin_id'   => $pinId,
+                'verified' => $verified,
+                'response' => $body,
+            ]);
+
+            return $verified;
+
+        } catch (\Exception $e) {
+            Log::error('Termii verify token exception', [
+                'pin_id' => $pinId,
+                'error'  => $e->getMessage(),
+            ]);
+
+            return false;
+        }
     }
 }

@@ -18,4 +18,6 @@ return [
 
     'min_withdrawal' => 100,
     'max_withdrawal' => 10_000_000,
+
+    'topup_fee_percent' => env('PAYYIGI_TOPUP_FEE', 0.5),
 ];
