@@ -12,7 +12,7 @@ return new class extends Migration
         Schema::create('otp_codes', function (Blueprint $table) {
             $table->uuid('id')->primary();
             $table->foreignUuid('user_id')->constrained()->cascadeOnDelete();
-            $table->string('code', 6);
+            $table->string('code', 40);
             $table->string('phone')->nullable(); // phone code was sent to
             $table->enum('purpose', [
                 'nin_verification',

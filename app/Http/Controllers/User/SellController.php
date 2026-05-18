@@ -4,9 +4,9 @@ namespace App\Http\Controllers\User;
 
 use App\Http\Controllers\Controller;
 use App\Models\AuditLog;
+use App\Models\BreetAsset;
 use App\Models\Transaction;
 use App\Services\Breet\BreetService;
-use App\Jobs\PollSellStatus;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -16,35 +16,53 @@ class SellController extends Controller
     public function __construct(private readonly BreetService $breet) {}
 
     /**
-     * GET /api/v1/sell/rate?asset=USDT&network=trc20&amount=100
+     * GET /api/v1/sell/assets
+     * List all supported sell assets (from breet_assets table).
+     * Frontend uses this to populate the asset/network picker.
+     */
+    public function assets(): JsonResponse
+    {
+        $assets = BreetAsset::where('is_active', true)
+            ->orderBy('symbol')
+            ->get(['id', 'symbol', 'name', 'network', 'icon', 'minimum']);
+
+        return response()->json(['data' => $assets]);
+    }
+
+    /**
+     * GET /api/v1/sell/rate?asset=USDT&network=Tron&amount=100&currency=ngn
      */
     public function getRate(Request $request): JsonResponse
     {
         $request->validate([
-            'asset'   => 'required|string|in:BTC,USDT,SOL,ETH,BNB,TRX,XRP,LTC,BCH,USDC,AVAX,TON,DOGE',
-            'network' => 'required|string',
-            'amount'  => 'required|numeric|min:0.000001',
+            'asset'    => 'required|string',
+            'network'  => 'required|string',
+            'amount'   => 'required|numeric|min:0.000001',
+            'currency' => 'sometimes|string|in:ngn,ghs',
         ]);
 
         try {
-            $rateData = $this->breet->getSellRate($request->asset);
-            $fees     = $this->breet->calculateFees((float) $request->amount, $rateData);
+            $breetAsset = BreetAsset::resolve($request->asset, $request->network);
+            $rateData   = $this->breet->getRateCalculator(
+                $breetAsset->id,
+                (float) $request->amount,
+                $request->currency ?? 'ngn'
+            );
 
+            // Breet returns NGNAmount for the given amountInUSD,
+            // plus the rate (NGN per USD) and cryptoAmount.
+            // Fees + your markup % are already baked in by Breet.
             return response()->json([
                 'data' => [
-                    'asset'          => strtoupper($request->asset),
-                    'network'        => $request->network,
-                    'crypto_amount'  => (float) $request->amount,
-                    'market_rate'    => $fees['market_rate'],
-                    'rate'           => $fees['display_rate'],
-                    'gross_ngn'      => $fees['gross_ngn'],
-                    'provider_fee'   => $fees['provider_fee'],
-                    'platform_fee'   => $fees['platform_fee'],
-                    'total_fee'      => $fees['total_fee'],
-                    'ngn_amount'     => $fees['net_ngn'],
-                    'spread_percent' => $fees['spread_percent'],
-                    'destination'    => 'wallet balance',
-                    'rate_valid_for' => config('payyigi.rate_lock_seconds', 60) . ' seconds',
+                    'asset'         => strtoupper($request->asset),
+                    'network'       => $request->network,
+                    'amount'        => (float) $request->amount,
+                    'currency'      => strtoupper($request->currency ?? 'NGN'),
+                    'rate'          => $rateData['rate'],         // NGN per USD
+                    'ngn_amount'    => $rateData['NGNAmount'],    // estimated NGN payout
+                    'crypto_amount' => $rateData['cryptoAmount'], // crypto equivalent of $amount USD
+                    'destination'   => 'your bank account directly',
+                    'note'          => 'Final amount is determined by Breet at settlement time.',
                 ],
             ]);
         } catch (\Exception $e) {
@@ -56,85 +74,89 @@ class SellController extends Controller
      * POST /api/v1/sell
      *
      * Flow:
-     * 1. Get fresh rate from Breet + calculate fees
-     * 2. Create transaction record
-     * 3. Call Breet → get unique deposit address for this order
-     * 4. Return deposit address to user (they send crypto here)
-     * 5. PollSellStatus job polls Breet every 30s
-     * 6. When Breet confirms → credit user wallet
-     *
-     * Breet pays NGN to our COMPANY bank account.
-     * We credit user's PayYigi wallet when confirmed.
+     * 1. Resolve Breet asset ID from ticker + network
+     * 2. Generate a permanent deposit address (once per user per asset — reused after)
+     * 3. Breet monitors blockchain; when crypto arrives it converts + settles to user's bank
+     * 4. Your markup % (set on Breet dashboard) is deducted automatically
+     * 5. We record the transaction for history — NO wallet credit needed
      */
     public function initiate(Request $request): JsonResponse
     {
         $request->validate([
-            'asset'   => 'required|string|in:BTC,USDT,SOL,ETH,BNB,TRX,XRP,LTC,BCH,USDC,AVAX,TON,DOGE',
-            'network' => 'required|string',
-            'amount'  => 'required|numeric|min:0.000001',
+            'asset'           => 'required|string',
+            'network'         => 'required|string',
+            'amount'          => 'required|numeric|min:0.000001',
+            'currency'        => 'sometimes|string|in:ngn,ghs',
+            'bank_account_id' => 'required|uuid|exists:bank_accounts,id',
         ]);
 
-        $user = $request->user();
+        $user        = $request->user();
+        $bankAccount = $user->bankAccounts()->findOrFail($request->bank_account_id);
 
         try {
-            $rateData  = $this->breet->getSellRate($request->asset);
-            $cryptoAmt = (float) $request->amount;
-            $fees      = $this->breet->calculateFees($cryptoAmt, $rateData);
+            $breetAsset = BreetAsset::resolve($request->asset, $request->network);
+            $cryptoAmt  = (float) $request->amount;
+            $rateData   = $this->breet->getRateCalculator(
+                $breetAsset->id,
+                $cryptoAmt,
+                $request->currency ?? 'ngn'
+            );
 
-            $transaction = DB::transaction(function () use ($user, $request, $cryptoAmt, $fees) {
-
+            $transaction = DB::transaction(function () use (
+                $user, $bankAccount, $request, $breetAsset, $cryptoAmt, $rateData
+            ) {
                 $txn = Transaction::create([
                     'user_id'        => $user->id,
                     'wallet_id'      => $user->wallet->id,
                     'type'           => 'sell',
-                    'entry_type'     => 'credit',
-                    'currency'       => 'NGN',
-                    'amount'         => $fees['net_ngn'],
-                    'fee'            => $fees['platform_fee'],
-                    'provider_fee'   => $fees['provider_fee'],
-                    'net_amount'     => $fees['net_ngn'],
-                    'spread_amount'  => $fees['spread_amount'],
+                    'entry_type'     => 'debit',
+                    'currency'       => strtoupper($request->currency ?? 'NGN'),
+                    // amount/net_amount updated from Breet's actual settlement on completion
+                    'amount'         => 0,
+                    'net_amount'     => 0,
                     'crypto_asset'   => strtoupper($request->asset),
                     'crypto_network' => $request->network,
                     'crypto_amount'  => $cryptoAmt,
-                    'rate'           => $fees['display_rate'],
+                    'rate'           => $rateData['rate'] ?? 0,
+                    // Bank account — Breet settles NGN here directly
+                    'bank_account_id'=> $bankAccount->id,
+                    'bank_name'      => $bankAccount->bank_name,
+                    'bank_code'      => $bankAccount->bank_code,
+                    'account_number' => $bankAccount->account_number,
+                    'account_name'   => $bankAccount->account_name,
                     'status'         => 'awaiting_crypto',
                     'session_id'     => session()->getId(),
                     'ip_address'     => request()->ip(),
                     'user_agent'     => request()->userAgent(),
                     'rate_locked_at' => now(),
-                    'rate_expires_at'=> now()->addSeconds(config('payyigi.rate_lock_seconds', 60)),
+                    'rate_expires_at'=> now()->addSeconds((int) config('payyigi.rate_lock_seconds', 60)),
                     'metadata'       => [
-                        'market_rate' => $fees['market_rate'],
-                        'gross_ngn'   => $fees['gross_ngn'],
-                        'total_fee'   => $fees['total_fee'],
+                        'estimated_ngn'  => $rateData['NGNAmount']    ?? 0,
+                        'crypto_amount'  => $rateData['cryptoAmount'] ?? $cryptoAmt,
+                        'breet_asset_id' => $breetAsset->id,
                     ],
                 ]);
 
-                // Breet generates a unique deposit address for this order.
-                // NGN payout goes to our company account — we credit user wallet on confirmation.
-                $breetOrder = app(BreetService::class)->createSellOrder(
-                    asset:          $request->asset,
-                    network:        $request->network,
-                    amount:         $cryptoAmt,
-                    reference:      $txn->reference,
-                    accountNumber:  config('payyigi.company_account_number'),
-                    bankCode:       config('payyigi.company_bank_code'),
-                    accountName:    config('payyigi.company_account_name'),
+                // Generate permanent deposit address on Breet with bank linked for auto-settlement.
+                // Breet will deduct your markup % (configured on Breet dashboard) automatically.
+                $breetWallet = app(BreetService::class)->generateDepositAddress(
+                    assetId:       $breetAsset->id,
+                    label:         "user-{$user->id}-{$breetAsset->symbol}",
+                    bankId:        $bankAccount->bank_code,   // Breet bankId = your bank_code
+                    accountNumber: $bankAccount->account_number,
+                    narration:     'PayYigi sell order',
                 );
 
                 $txn->update([
-                    'provider_order_id'  => $breetOrder['id']        ?? null,
-                    'provider_reference' => $breetOrder['reference']  ?? null,
-                    'deposit_address'    => $breetOrder['address']    ?? null,
-                    'provider_response'  => $breetOrder,
+                    'provider_order_id' => $breetWallet['id']      ?? null,
+                    'deposit_address'   => $breetWallet['address']  ?? null,
+                    'provider_response' => $breetWallet,
                 ]);
 
                 return $txn;
             });
 
-            // Poll Breet for status every 30s — credits wallet when completed
-            PollSellStatus::dispatch($transaction)->delay(now()->addSeconds(30));
+            \App\Jobs\PollSellStatus::dispatch($transaction)->delay(now()->addSeconds(30));
 
             AuditLog::record('transaction.sell_initiated', [
                 'user_id'        => $user->id,
@@ -144,28 +166,28 @@ class SellController extends Controller
                     'asset'      => $transaction->crypto_asset,
                     'network'    => $transaction->crypto_network,
                     'amount'     => $transaction->crypto_amount,
-                    'ngn'        => $transaction->amount,
+                    'bank'       => $transaction->account_number,
                     'reference'  => $transaction->reference,
                 ],
             ]);
 
             return response()->json([
-                'message' => 'Sell order created. Send your crypto to the address below. Your wallet will be credited once confirmed.',
+                'message' => 'Sell order created. Send your crypto to the address below. NGN will be sent directly to your bank account.',
                 'data'    => [
                     'reference'       => $transaction->reference,
                     'asset'           => $transaction->crypto_asset,
                     'network'         => $transaction->crypto_network,
                     'amount_to_send'  => $transaction->crypto_amount,
                     'deposit_address' => $transaction->deposit_address,
-                    'rate'            => $transaction->rate,
-                    'gross_ngn'       => $fees['gross_ngn'],
-                    'provider_fee'    => $fees['provider_fee'],
-                    'platform_fee'    => $fees['platform_fee'],
-                    'total_fee'       => $fees['total_fee'],
-                    'ngn_to_receive'  => $transaction->amount,
-                    'destination'     => 'wallet balance',
-                    'status'          => $transaction->status,
-                    'expires_at'      => $transaction->rate_expires_at,
+                    'estimated_ngn'   => $rateData['NGNAmount'] ?? 0,
+                    'destination'     => [
+                        'bank_name'      => $transaction->bank_name,
+                        'account_number' => $transaction->account_number,
+                        'account_name'   => $transaction->account_name,
+                    ],
+                    'note'      => 'We will apply your configured markup and settle net NGN directly to your bank.',
+                    'status'    => $transaction->status,
+                    'expires_at'=> $transaction->rate_expires_at,
                 ],
             ], 201);
 

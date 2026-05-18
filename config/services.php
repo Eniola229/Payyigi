@@ -36,7 +36,7 @@ return [
     'termii' => [
         'api_key'   => env('TERMII_API_KEY'),
         'sender_id' => env('TERMII_SENDER_ID', 'PayYigi'),
-        'base_url'  => env('TERMII_BASE_URL', 'https://api.ng.termii.com/api'),
+        'base_url'  => env('TERMII_BASE_URL', 'https://api.termii.com/api'),
         'channel'   => 'dnd', // dnd = transactional route, bypasses DND numbers
     ],
     // ── Korapay (NIN verification + BVN + future payments) ──────────────────────────
@@ -52,10 +52,12 @@ return [
         'public_key'  => env('LOCALRAMP_PUBLIC_KEY'),
         'base_url'    => env('LOCALRAMP_BASE_URL', 'https://api.localramp.co/v1'),
     ],
-
+    
     'breet' => [
-        'api_key'        => env('BREET_API_KEY'),
         'base_url'       => env('BREET_BASE_URL', 'https://api.breet.io/v1'),
+        'app_id'         => env('BREET_APP_ID'),
+        'app_secret'     => env('BREET_APP_SECRET'),
+        'env'            => env('BREET_ENV', 'production'),
         'webhook_secret' => env('BREET_WEBHOOK_SECRET'),
     ],
     'company_account_number' => env('COMPANY_ACCOUNT_NUMBER'),

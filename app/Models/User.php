@@ -26,12 +26,12 @@ class User extends Authenticatable implements MustVerifyEmail
         'two_factor_enabled', 'two_factor_secret', 'two_factor_recovery_codes',
         'is_active', 'is_suspended', 'suspension_reason', 'suspended_at',
         'referral_code', 'referred_by', 'avatar', 'date_of_birth',
-        'last_login_ip', 'last_login_at', 'last_login_device',
+        'last_login_ip', 'last_login_at', 'last_login_device', 'bvn_verified', 'bvn'
     ];
 
     protected $hidden = [
         'password', 'transaction_pin', 'two_factor_secret',
-        'two_factor_recovery_codes', 'nin', 'remember_token',
+        'two_factor_recovery_codes', 'nin', 'bvn', 'remember_token',
     ];
 
     protected $casts = [
@@ -40,12 +40,14 @@ class User extends Authenticatable implements MustVerifyEmail
         'suspended_at'              => 'datetime',
         'last_login_at'             => 'datetime',
         'nin_verified'              => 'boolean',
+        'bvn_verified'              => 'boolean',
         'two_factor_enabled'        => 'boolean',
         'is_active'                 => 'boolean',
         'is_suspended'              => 'boolean',
         'two_factor_recovery_codes' => 'encrypted:array',
         'two_factor_secret'         => 'encrypted',
         'nin'                       => 'encrypted',
+        'bvn'                       => 'encrypted',
     ];
 
     // ── Relationships ─────────────────────────────────────────────────────────

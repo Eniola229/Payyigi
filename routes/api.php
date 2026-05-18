@@ -136,7 +136,8 @@ Route::middleware(['auth:sanctum', 'account.active'])->group(function () {
         });
 
         // Sell — credits wallet on completion
-        Route::get('/sell/rate',       [SellController::class, 'getRate']);
+        Route::get('/sell/assets',       [SellController::class, 'assets']);
+        Route::post('/sell/rate',       [SellController::class, 'getRate']);
         Route::post('/sell',           [SellController::class, 'initiate'])->middleware('txn.pin');
         Route::get('/sell/history',    [SellController::class, 'history']);
         Route::get('/sell/{reference}',[SellController::class, 'show']);

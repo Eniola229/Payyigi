@@ -2,138 +2,78 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\AuditLog;
+use App\Jobs\PollSellStatus;
 use App\Models\Transaction;
-use App\Models\WebhookLog;
 use App\Services\Breet\BreetService;
-use App\Services\WalletService;
-use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 class BreetWebhookController extends Controller
 {
-    public function __construct(
-        private readonly BreetService  $breet,
-        private readonly WalletService $walletService,
-    ) {}
-
     /**
-     * POST /api/v1/webhooks/breet
-     * No auth middleware — verified via HMAC signature
+     * POST /webhooks/breet
+     *
+     * Breet sends a webhook when a deposit is detected on any of your wallets.
+     * The payload contains the wallet ID and a Breet transaction ID.
+     * We match the wallet ID to our transaction, store the Breet transaction ID,
+     * then immediately check the transaction status to complete/fail it.
      */
-    public function handle(Request $request): JsonResponse
+    public function handle(Request $request, BreetService $breet): \Illuminate\Http\JsonResponse
     {
         $rawPayload = $request->getContent();
-        $signature  = $request->header('X-Breet-Signature')
-                   ?? $request->header('X-Webhook-Signature')
-                   ?? '';
+        $signature  = $request->header('x-breet-signature') ?? '';
 
-        // Always log the raw webhook
-        $webhookLog = WebhookLog::create([
-            'source'         => 'breet',
-            'event_type'     => $request->input('event', 'unknown'),
-            'breet_order_id' => $request->input('data.id') ?? $request->input('data.order_id'),
-            'payload'        => $request->all(),
-            'status'         => 'pending',
+        // Verify the webhook came from Breet
+        if (!$breet->verifyWebhookSignature($rawPayload, $signature)) {
+            Log::warning('Breet webhook: invalid signature');
+            return response()->json(['message' => 'Invalid signature'], 401);
+        }
+
+        $payload   = $request->json()->all();
+        $event     = $payload['event']  ?? null;
+        $data      = $payload['data']   ?? [];
+        $walletId  = $data['wallet']    ?? $data['walletId'] ?? null; // Breet wallet ID
+        $breetTxId = $data['id']        ?? null;                      // Breet transaction ID
+        $status    = $data['status']    ?? null;
+
+        Log::info('Breet webhook received', [
+            'event'       => $event,
+            'wallet_id'   => $walletId,
+            'breet_tx_id' => $breetTxId,
+            'status'      => $status,
         ]);
 
-        // Verify HMAC signature
-        if (!$this->breet->verifyWebhookSignature($rawPayload, $signature)) {
-            Log::warning('Breet webhook: invalid signature', ['webhook_log_id' => $webhookLog->id]);
-            $webhookLog->markFailed('Invalid signature');
-            return response()->json(['message' => 'Invalid signature.'], 401);
+        // Find our transaction by the wallet ID (stored as provider_order_id)
+        if (!$walletId) {
+            return response()->json(['message' => 'No wallet ID in payload'], 200);
         }
 
-        $event = $request->input('event');
-        $data  = $request->input('data', []);
-
-        try {
-            match ($event) {
-                'transaction.completed'  => $this->onCompleted($data),
-                'transaction.failed'     => $this->onFailed($data),
-                'transaction.processing' => $this->onProcessing($data),
-                default => Log::info("Breet webhook: unhandled event [{$event}]"),
-            };
-
-            $webhookLog->markProcessed();
-            return response()->json(['message' => 'OK']);
-
-        } catch (\Exception $e) {
-            $webhookLog->markFailed($e->getMessage());
-            Log::error('Breet webhook error', ['error' => $e->getMessage(), 'event' => $event]);
-            // Return 200 so Breet doesn't keep retrying for our internal errors
-            return response()->json(['message' => 'Received.']);
-        }
-    }
-
-    private function findTransaction(array $data): ?Transaction
-    {
-        return Transaction::where('breet_order_id', $data['id'] ?? '')
-            ->orWhere('reference', $data['reference'] ?? '')
+        $txn = Transaction::where('provider_order_id', $walletId)
+            ->where('type', 'sell')
+            ->whereIn('status', ['awaiting_crypto', 'processing'])
             ->first();
-    }
 
-    private function onCompleted(array $data): void
-    {
-        $transaction = $this->findTransaction($data);
-        if (!$transaction || $transaction->isCompleted()) return;
+        if (!$txn) {
+            Log::info('Breet webhook: no matching pending transaction for wallet', ['wallet_id' => $walletId]);
+            return response()->json(['message' => 'No matching transaction'], 200);
+        }
 
-        DB::transaction(function () use ($transaction, $data) {
-            // Credit wallet
-            $balanceBefore = (float) $transaction->wallet->balance;
-            $transaction->wallet->credit((float) $transaction->amount);
+        // Store the Breet transaction ID so PollSellStatus can use it
+        if ($breetTxId && !$txn->provider_reference) {
+            $txn->update(['provider_reference' => $breetTxId]);
+        }
 
-            $transaction->update([
-                'status'                  => 'completed',
-                'completed_at'            => now(),
-                'balance_before'          => $balanceBefore,
-                'balance_after'           => $transaction->wallet->fresh()->balance,
-                'bank_transfer_reference' => $data['payout_reference'] ?? null,
-                'breet_response'          => array_merge(
-                    $transaction->breet_response ?? [],
-                    ['completion_data' => $data]
-                ),
-            ]);
+        // Handle the event
+        if ($status === 'completed') {
+            PollSellStatus::markCompleted($txn->fresh(), $data);
+        } elseif ($status === 'failed') {
+            PollSellStatus::markFailed($txn->fresh(), $data);
+        } else {
+            // processing/pending — update status and let poll job handle completion
+            $txn->update(['status' => 'processing']);
+            PollSellStatus::dispatch($txn)->delay(now()->addSeconds(15));
+        }
 
-            AuditLog::record('transaction.sell_completed', [
-                'user_id'        => $transaction->user_id,
-                'auditable_type' => Transaction::class,
-                'auditable_id'   => $transaction->id,
-                'new_values'     => ['amount' => $transaction->amount, 'reference' => $transaction->reference],
-            ]);
-
-            $transaction->user->notify(
-                new \App\Notifications\TransactionCompletedNotification($transaction)
-            );
-        });
-    }
-
-    private function onFailed(array $data): void
-    {
-        $transaction = $this->findTransaction($data);
-        if (!$transaction || $transaction->isFailed()) return;
-
-        $transaction->update([
-            'status'         => 'failed',
-            'failed_at'      => now(),
-            'failure_reason' => $data['reason'] ?? 'Failed on payment processor.',
-        ]);
-
-        $transaction->user->notify(
-            new \App\Notifications\TransactionFailedNotification($transaction)
-        );
-    }
-
-    private function onProcessing(array $data): void
-    {
-        $transaction = $this->findTransaction($data);
-        if (!$transaction) return;
-
-        $transaction->update([
-            'status'         => 'converting',
-            'crypto_tx_hash' => $data['tx_hash'] ?? null,
-        ]);
+        return response()->json(['message' => 'Webhook processed'], 200);
     }
 }

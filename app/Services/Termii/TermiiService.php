@@ -19,9 +19,9 @@ class TermiiService
      * Termii generates the PIN internally and reads it aloud to the recipient.
      * Verify the PIN afterwards using the Termii Verify Token API.
      *
-     * POST /api/sms/otp/send/voice
+     * POST /api/voice/otp/send
      *
-     * @return array{success: bool, pin_id: string|null}
+     * @return array{success: bool, pin_id: string|null, message_id: string|null}
      */
     public function sendVoiceToken(
         string $phone,
@@ -40,7 +40,7 @@ class TermiiService
 
             $body = $response->json();
 
-            if (($body['code'] ?? '') === 'ok') {
+            if (($body['code'] ?? '') === 'ok' || ($response->status() === 200)) {
                 Log::info('Termii voice token sent', [
                     'phone_last4' => substr($phone, -4),
                     'message_id'  => $body['message_id'] ?? null,
@@ -48,17 +48,19 @@ class TermiiService
                 ]);
 
                 return [
-                    'success' => true,
-                    'pin_id'  => $body['pinId'] ?? null,
+                    'success'    => true,
+                    'pin_id'     => $body['pinId'] ?? null,
+                    'message_id' => $body['message_id'] ?? null,
                 ];
             }
 
             Log::error('Termii voice token failed', [
                 'phone_last4' => substr($phone, -4),
                 'response'    => $body,
+                'status'      => $response->status(),
             ]);
 
-            return ['success' => false, 'pin_id' => null];
+            return ['success' => false, 'pin_id' => null, 'message_id' => null];
 
         } catch (\Exception $e) {
             Log::error('Termii voice token exception', [
@@ -66,7 +68,7 @@ class TermiiService
                 'error'       => $e->getMessage(),
             ]);
 
-            return ['success' => false, 'pin_id' => null];
+            return ['success' => false, 'pin_id' => null, 'message_id' => null];
         }
     }
 
