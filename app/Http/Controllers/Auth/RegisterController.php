@@ -11,7 +11,7 @@ use App\Notifications\VerifyEmailNotification;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
-
+ 
 class RegisterController extends Controller
 {
     public function __invoke(RegisterRequest $request): JsonResponse

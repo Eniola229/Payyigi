@@ -29,6 +29,8 @@ class User extends Authenticatable implements MustVerifyEmail
         'last_login_ip', 'last_login_at', 'last_login_device', 'bvn_verified', 'bvn'
     ];
 
+    protected $appends = ['full_name', 'has_transaction_pin'];
+
     protected $hidden = [
         'password', 'transaction_pin', 'two_factor_secret',
         'two_factor_recovery_codes', 'nin', 'bvn', 'remember_token',
@@ -96,6 +98,11 @@ class User extends Authenticatable implements MustVerifyEmail
         $this->attributes['transaction_pin'] = Hash::make($value);
     }
 
+    public function getHasTransactionPinAttribute(): bool
+    {
+        return !is_null($this->getRawOriginal('transaction_pin'));
+    }
+
     public function setPasswordAttribute(string $value): void
     {
         $this->attributes['password'] = Hash::make($value);
@@ -128,5 +135,16 @@ class User extends Authenticatable implements MustVerifyEmail
     public function scopeActive($query)
     {
         return $query->where('is_active', true)->where('is_suspended', false);
+    }
+
+    public function getStatsAttribute(): array
+    {
+        return [
+            'wallet_balance'     => $this->wallet?->balance ?? 0,
+            'total_sold'         => $this->transactions()->completed()->ofType('crypto_sell')->sum('amount'),
+            'total_transactions' => $this->transactions()->count(),
+            'locked_balance'     => $this->wallet?->locked_balance ?? 0,
+            'pending_balance'    => $this->transactions()->pending()->where('entry_type', 'debit')->sum('amount'),
+        ];
     }
 }

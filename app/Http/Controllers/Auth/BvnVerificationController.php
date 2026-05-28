@@ -57,7 +57,7 @@ class BvnVerificationController extends Controller
         // ── Throttle: max 3 attempts per 30 minutes ───────────────────────────
         // Facial matching is expensive (API cost + compute). Limit attempts hard.
         $throttleKey = "bvn_verify:{$user->id}";
-        if (RateLimiter::tooManyAttempts($throttleKey, 3)) {
+        if (RateLimiter::tooManyAttempts($throttleKey, 10)) {
             $seconds = RateLimiter::availableIn($throttleKey);
             return response()->json([
                 'message' => "Too many attempts. Please try again in {$seconds} seconds.",

@@ -114,7 +114,12 @@ class KorapayService
             $payload['validation']['date_of_birth'] = $dateOfBirth;
         }
 
-        $response = Http::withHeaders([
+        $response = Http::withOptions([
+            'curl' => [
+                CURLOPT_SSLVERSION     => CURL_SSLVERSION_TLSv1_2,
+                CURLOPT_SSL_VERIFYPEER => true,
+            ],
+        ])->withHeaders([
             'Authorization' => 'Bearer ' . $this->secretKey,
             'Content-Type'  => 'application/json',
         ])->post("{$this->baseUrl}/identities/ng/bvn", $payload);

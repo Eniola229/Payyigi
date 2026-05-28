@@ -89,9 +89,29 @@ Route::middleware(['auth:sanctum', 'account.active'])->group(function () {
         Route::post('/virtual-account/generate', [\App\Http\Controllers\User\VirtualAccountController::class, 'generate']);
         Route::get('/virtual-account',           [\App\Http\Controllers\User\VirtualAccountController::class, 'show']);
     });
-
+ 
     // Profile & Wallet
-    Route::get('/user/profile', fn(Request $r) => response()->json(['data' => $r->user()->load('wallet')]));
+    Route::get('/user/profile', function (Request $r) {
+        $user = $r->user()->load('wallet');
+
+        $stats = [
+            'wallet_balance'    => $user->wallet?->balance ?? 0,
+            'total_sold'        => $user->transactions()
+                                        ->completed()
+                                        ->ofType('crypto_sell')
+                                        ->sum('amount'),
+            'total_transactions'=> $user->transactions()->count(),
+            'locked_balance'    => $user->wallet?->locked_balance ?? 0,
+            'pending_balance'   => $user->transactions()
+                                        ->pending()
+                                        ->where('entry_type', 'debit')
+                                        ->sum('amount'),
+        ];
+
+        return response()->json([
+            'data' => array_merge($user->toArray(), ['stats' => $stats])
+        ]);
+    });
     Route::patch('/user/profile', function (Request $r) {
         $r->validate(['first_name' => 'sometimes|string|min:2|max:50', 'last_name' => 'sometimes|string|min:2|max:50', 'date_of_birth' => 'sometimes|date|before:-18 years']);
         $r->user()->update($r->only('first_name', 'last_name', 'date_of_birth'));

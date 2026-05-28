@@ -40,7 +40,7 @@ class EmailVerificationController extends Controller
     }
 
     /**
-     * Resend verification email
+     * Resend verification email 
      */ 
     public function resend(Request $request): JsonResponse
     {
