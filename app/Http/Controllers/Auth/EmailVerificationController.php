@@ -1,47 +1,48 @@
 <?php
-
 namespace App\Http\Controllers\Auth;
 
 use App\Http\Controllers\Controller;
 use App\Models\AuditLog;
 use App\Models\User;
 use App\Notifications\VerifyEmailNotification;
-use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\URL;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\RateLimiter;
 
 class EmailVerificationController extends Controller
 {
-    /**
-     * Verify email via signed URL
-     */
-    public function verify(Request $request, string $id, string $hash): JsonResponse
+    public function verify(Request $request, string $id, string $hash): \Illuminate\Http\Response
     {
-        // Remove this line:
-        // if (!URL::hasValidSignature($request)) {
-        //     return response()->json(['message' => 'Invalid or expired verification link.'], 403);
-        // }
-        
-        // The 'signed' middleware handles it automatically
-        
         $user = User::where('id', $id)->firstOrFail();
-        
+
         if (!hash_equals(sha1($user->getEmailForVerification()), $hash)) {
-            return response()->json(['message' => 'Invalid verification link.'], 403);
+            $title      = 'Verification Failed';
+            $message    = "This verification link is invalid or has expired.\n\nPlease request a new verification email and try again.";
+            $button_url  = 'https://payyigi.com/login';
+            $button_text = 'Go to Login';
+
+            return response(view('emails.template', compact('title', 'message', 'button_url', 'button_text'))->render());
         }
-        
+
         if ($user->hasVerifiedEmail()) {
-            return response()->json(['message' => 'Email already verified.']);
+            $title      = 'Already Verified';
+            $message    = "Your email has already been verified.\n\nYou can go ahead and log in to your PayYigi account.";
+            $button_url  = 'https://payyigi.com/login';
+            $button_text = 'Go to Login';
+
+            return response(view('emails.template', compact('title', 'message', 'button_url', 'button_text'))->render());
         }
-        
+
         $user->markEmailAsVerified();
-        
-        return response()->json(['message' => 'Email verified successfully. You can now log in.']);
+
+        $title      = 'Email Verified!';
+        $message    = "Hello {$user->first_name}!\n\nYour email has been verified successfully. Welcome to PayYigi!\n\nYou can now log in and start trading.";
+        $button_url  = 'https://payyigi.com/login';
+        $button_text = 'Go to Login';
+
+        return response(view('emails.template', compact('title', 'message', 'button_url', 'button_text'))->render());
     }
 
-    /**
-     * Resend verification email 
-     */ 
     public function resend(Request $request): JsonResponse
     {
         $request->validate(['email' => 'required|email']);
@@ -49,7 +50,6 @@ class EmailVerificationController extends Controller
         $user = User::where('email', strtolower($request->email))->first();
 
         if (!$user) {
-            // Don't reveal if email exists
             return response()->json(['message' => 'If that email exists, a verification link has been sent.']);
         }
 
@@ -57,15 +57,16 @@ class EmailVerificationController extends Controller
             return response()->json(['message' => 'Email already verified.']);
         }
 
-        // Throttle resend
         $key = 'email_verify_resend|' . $user->id;
-        if (\Illuminate\Support\Facades\RateLimiter::tooManyAttempts($key, 3)) {
-            $seconds = \Illuminate\Support\Facades\RateLimiter::availableIn($key);
+
+        if (RateLimiter::tooManyAttempts($key, 3)) {
+            $seconds = RateLimiter::availableIn($key);
             return response()->json([
                 'message' => "Too many requests. Try again in {$seconds} seconds.",
             ], 429);
         }
-        \Illuminate\Support\Facades\RateLimiter::hit($key, 60 * 10);
+
+        RateLimiter::hit($key, 60 * 10);
 
         $user->notify(new VerifyEmailNotification());
 

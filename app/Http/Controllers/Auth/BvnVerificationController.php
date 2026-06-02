@@ -54,16 +54,16 @@ class BvnVerificationController extends Controller
             ], 422);
         }
 
-        // ── Throttle: max 3 attempts per 30 minutes ───────────────────────────
+        // ── Throttle: max 3 attempts per 10 minutes ───────────────────────────
         // Facial matching is expensive (API cost + compute). Limit attempts hard.
         $throttleKey = "bvn_verify:{$user->id}";
-        if (RateLimiter::tooManyAttempts($throttleKey, 10)) {
+        if (RateLimiter::tooManyAttempts($throttleKey, 3)) {
             $seconds = RateLimiter::availableIn($throttleKey);
             return response()->json([
                 'message' => "Too many attempts. Please try again in {$seconds} seconds.",
             ], 429);
         }
-        RateLimiter::hit($throttleKey, 60 * 30);
+        RateLimiter::hit($throttleKey, 60 * 10);
 
         // ── Validate selfie format ────────────────────────────────────────────
         // Must be a valid base64 image string. We do a lightweight check here.
@@ -95,8 +95,9 @@ class BvnVerificationController extends Controller
 
         // ── Evaluate facial match result ──────────────────────────────────────
         $selfieValidation = $bvnData['validation']['selfie'] ?? null;
-        $selfieMatch      = $selfieValidation['match'] ?? false;
-        $confidence       = $selfieValidation['confidence'] ?? 0;
+        $selfieMatch       = $selfieValidation['match'] ?? false;
+        $confidenceRating  = $selfieValidation['confidence_rating'] ?? 0;
+        $confidence        = $confidenceRating / 100;
 
         Log::info('BVN facial match result', [
             'user_id'    => $user->id,
@@ -105,13 +106,14 @@ class BvnVerificationController extends Controller
             'confidence' => $confidence,
         ]);
 
+    
         if (!$selfieMatch || $confidence < self::MIN_CONFIDENCE) {
             AuditLog::record('user.bvn_face_match_failed', [
                 'user_id'    => $user->id,
                 'new_values' => [
                     'bvn_last4'   => substr($request->bvn, -4),
                     'match'       => $selfieMatch,
-                    'confidence'  => $confidence,
+                    'confidence'  => $confidenceRating,
                     'korapay_ref' => $bvnData['reference'] ?? null,
                 ],
             ]);
@@ -131,7 +133,7 @@ class BvnVerificationController extends Controller
             'user_id'    => $user->id,
             'new_values' => [
                 'bvn_last4'   => substr($request->bvn, -4),
-                'confidence'  => $confidence,
+                'confidence'  => $confidenceRating,
                 'korapay_ref' => $bvnData['reference'] ?? null,
             ],
         ]);

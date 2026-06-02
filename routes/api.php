@@ -38,6 +38,11 @@ Route::prefix('auth')->group(function () {
          ->middleware('throttle:10,5');
 });
 
+    // ── Public Admin Auth ─────────────────────────────────────────────────────────
+    Route::prefix('admin')->group(function () {
+        Route::post('/login', \App\Http\Controllers\Admin\Auth\AdminLoginController::class);
+    });
+
 // ── Authenticated Routes ─────────────────────────────────────────────────────
 Route::middleware(['auth:sanctum', 'account.active'])->group(function () {
 
@@ -179,9 +184,6 @@ Route::middleware(['auth:sanctum', 'account.active'])->group(function () {
 
     // ── Admin Routes ─────────────────────────────────────────────────────────────
     Route::prefix('admin')->group(function () {
-
-        // Public admin auth
-        Route::post('/login', \App\Http\Controllers\Admin\Auth\AdminLoginController::class);
 
         // Authenticated admin routes
         Route::middleware(['auth:admin', 'admin.active'])->group(function () {

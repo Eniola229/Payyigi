@@ -60,6 +60,11 @@ return [
         'env'            => env('BREET_ENV', 'production'),
         'webhook_secret' => env('BREET_WEBHOOK_SECRET'),
     ],
+
+    'brevo' => [
+        'key' => env('BREVO_API_KEY'),
+    ],
+    
     'company_account_number' => env('COMPANY_ACCOUNT_NUMBER'),
     'company_bank_code'      => env('COMPANY_BANK_CODE'),
     'company_account_name'   => env('COMPANY_ACCOUNT_NAME'),

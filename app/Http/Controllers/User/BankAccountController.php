@@ -24,7 +24,7 @@ class BankAccountController extends Controller
         $request->validate([
             'bank_name'      => 'required|string|max:100',
             'bank_code'      => 'required|string|max:10',
-            'account_number' => 'required|string|size:10|regex:/^\d{10}$/',
+            'account_number' => 'required|string|size:10|regex:/^\d{10}$/|unique:bank_accounts,account_number',
             'account_name'   => 'required|string|max:100',
         ]);
 
