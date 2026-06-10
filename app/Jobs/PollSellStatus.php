@@ -60,11 +60,7 @@ class PollSellStatus implements ShouldQueue
             }
 
             // No transaction yet — crypto hasn't arrived. Retry later.
-            Log::info('PollSellStatus: wallet active, awaiting crypto deposit', [
-                'reference'  => $txn->reference,
-                'wallet_id'  => $txn->provider_order_id,
-                'address'    => $txn->deposit_address,
-            ]);
+
             $this->release(30);
 
         } catch (\Exception $e) {

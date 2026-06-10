@@ -127,6 +127,7 @@ class BvnVerificationController extends Controller
         $user->update([
             'bvn'          => $request->bvn,  // auto-encrypted via cast
             'bvn_verified' => true,
+            'kyc_level' => 'completed',
         ]);
 
         AuditLog::record('user.bvn_verified', [

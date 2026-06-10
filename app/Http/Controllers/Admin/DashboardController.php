@@ -5,66 +5,91 @@ namespace App\Http\Controllers\Admin;
 use App\Http\Controllers\Controller;
 use App\Models\Transaction;
 use App\Models\User;
-use App\Models\FraudFlag;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
 
 class DashboardController extends Controller
 {
     public function __invoke(Request $request): JsonResponse
     {
-        $today     = now()->startOfDay();
-        $thisWeek  = now()->startOfWeek();
-        $thisMonth = now()->startOfMonth();
+        // Get completed transactions for volume calculation
+        $completedTransactions = Transaction::where('status', 'completed');
+        
+        // Calculate total volume (all completed transactions)
+        $totalVolume = (clone $completedTransactions)->sum('amount');
+        
+        // Get pending orders (transactions with pending/processing status)
+        $pendingOrders = Transaction::whereIn('status', ['pending', 'awaiting_crypto', 'processing'])->count();
+        
+        // Get completed orders count
+        $completedOrders = Transaction::where('status', 'completed')->count();
+        
+        // Get pending KYC
+        $pendingKYC = User::where(function($query) {
+            $query->whereNull('kyc_level')
+                  ->orWhere('kyc_level', '!=', 'completed')
+                  ->orWhere('kyc_level', 'none');
+        })->count();
+        
+        // Get recent users (last 5)
+        $recentUsers = User::latest()
+            ->take(5)
+            ->get(['id', 'first_name', 'last_name', 'email', 'kyc_level', 'created_at']);
+        
+        // Get recent transactions (last 5)
+        $recentTransactions = Transaction::with('user:id,first_name,last_name,email')
+            ->latest()
+            ->take(5)
+            ->get(['id', 'reference', 'type', 'amount', 'status', 'user_id', 'created_at']);
+        
+        // Get KYC completed users
+        $kycCompletedUsers = User::where('kyc_level', 'completed')
+            ->latest()
+            ->take(10)
+            ->get(['id', 'first_name', 'last_name', 'email', 'kyc_level', 'created_at', 'updated_at']);
 
         return response()->json([
             'data' => [
-
-                // ── Users ─────────────────────────────────────────────────────
-                'users' => [
-                    'total'           => User::count(),
-                    'verified_today'  => User::whereDate('created_at', today())->count(),
-                    'nin_verified'    => User::where('nin_verified', true)->count(),
-                    'suspended'       => User::where('is_suspended', true)->count(),
+                'stats' => [
+                    'total_volume'     => (float) $totalVolume,
+                    'pending_orders'   => $pendingOrders,
+                    'completed_orders' => $completedOrders,
+                    'pending_kyc'      => $pendingKYC,
                 ],
-
-                // ── Transactions today ────────────────────────────────────────
-                'transactions_today' => [
-                    'total'     => Transaction::whereDate('created_at', today())->count(),
-                    'completed' => Transaction::whereDate('created_at', today())->where('status', 'completed')->count(),
-                    'pending'   => Transaction::whereDate('created_at', today())->whereIn('status', ['pending', 'awaiting_crypto', 'processing'])->count(),
-                    'failed'    => Transaction::whereDate('created_at', today())->where('status', 'failed')->count(),
-                ],
-
-                // ── Volume ────────────────────────────────────────────────────
-                'volume' => [
-                    'today'      => Transaction::whereDate('completed_at', today())->where('status', 'completed')->sum('amount'),
-                    'this_week'  => Transaction::where('completed_at', '>=', $thisWeek)->where('status', 'completed')->sum('amount'),
-                    'this_month' => Transaction::where('completed_at', '>=', $thisMonth)->where('status', 'completed')->sum('amount'),
-                ],
-
-                // ── Revenue (spread earnings) ──────────────────────────────
-                'revenue' => [
-                    'today'      => Transaction::whereDate('completed_at', today())->where('status', 'completed')->sum('spread_amount'),
-                    'this_week'  => Transaction::where('completed_at', '>=', $thisWeek)->where('status', 'completed')->sum('spread_amount'),
-                    'this_month' => Transaction::where('completed_at', '>=', $thisMonth)->where('status', 'completed')->sum('spread_amount'),
-                ],
-
-                // ── By type ───────────────────────────────────────────────────
-                'by_type' => Transaction::where('status', 'completed')
-                    ->whereDate('created_at', today())
-                    ->select('type', DB::raw('count(*) as count'), DB::raw('sum(amount) as volume'))
-                    ->groupBy('type')
-                    ->get(),
-
-                // ── Fraud ─────────────────────────────────────────────────────
-                'fraud' => [
-                    'open_flags'    => FraudFlag::where('status', 'open')->count(),
-                    'critical'      => FraudFlag::where('status', 'open')->where('severity', 'critical')->count(),
-                    'resolved_today'=> FraudFlag::whereDate('resolved_at', today())->count(),
-                ],
-
+                
+                'recent_users' => $recentUsers->map(function ($user) {
+                    return [
+                        'id'         => $user->id,
+                        'name'       => trim($user->first_name . ' ' . $user->last_name),
+                        'email'      => $user->email,
+                        'kyc_status' => $user->kyc_level ?? 'pending',
+                        'joined_at'  => optional($user->created_at)->toDateTimeString(),
+                    ];
+                }),
+                
+                'recent_transactions' => $recentTransactions->map(function ($transaction) {
+                    return [
+                        'id'         => $transaction->id,
+                        'reference'  => $transaction->reference,
+                        'type'       => $transaction->type,
+                        'amount'     => (float) $transaction->amount,
+                        'status'     => $transaction->status,
+                        'user'       => $transaction->user
+                            ? trim($transaction->user->first_name . ' ' . $transaction->user->last_name)
+                            : 'N/A',
+                        'created_at' => optional($transaction->created_at)->toDateTimeString(),
+                    ];
+                }),
+                
+                'kyc_completed_users' => $kycCompletedUsers->map(function ($user) {
+                    return [
+                        'id'          => $user->id,
+                        'name'        => trim($user->first_name . ' ' . $user->last_name),
+                        'email'       => $user->email,
+                        'kyc_level'   => $user->kyc_level,
+                        'verified_at' => optional($user->updated_at)->toDateTimeString(),
+                    ];
+                }),
             ],
         ]);
     }

@@ -21,7 +21,7 @@ return new class extends Migration
             $table->boolean('nin_verified')->default(false);
             $table->timestamp('nin_verified_at')->nullable();
             $table->string('nin_phone')->nullable(); // phone tied to NIN
-            $table->enum('kyc_level', ['none', 'basic', 'advanced'])->default('none');
+            $table->enum('kyc_level', ['none', 'basic', 'advanced', 'true', 'false'])->default('none');
             $table->timestamp('kyc_verified_at')->nullable();
             $table->boolean('two_factor_enabled')->default(false);
             $table->text('two_factor_secret')->nullable(); // TOTP secret, encrypted

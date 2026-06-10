@@ -10,15 +10,17 @@ use App\Services\Breet\BreetService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use App\Services\Korapay\KorapayService;
 
 class SellController extends Controller
 {
-    public function __construct(private readonly BreetService $breet) {}
+    public function __construct(
+        private readonly BreetService $breet,
+        private readonly KorapayService $korapay,
+    ) {}
 
     /**
      * GET /api/v1/sell/assets
-     * List all supported sell assets (from breet_assets table).
-     * Frontend uses this to populate the asset/network picker.
      */
     public function assets(): JsonResponse
     {
@@ -30,7 +32,10 @@ class SellController extends Controller
     }
 
     /**
-     * GET /api/v1/sell/rate?asset=USDT&network=Tron&amount=100&currency=ngn
+     * GET /api/v1/sell/rate?asset=BTC&network=Bitcoin&amount=0.001&currency=ngn
+     *
+     * `amount` is in CRYPTO units (e.g. 0.001 BTC).
+     * We convert to USD first, then call Breet's rate calculator.
      */
     public function getRate(Request $request): JsonResponse
     {
@@ -42,25 +47,28 @@ class SellController extends Controller
         ]);
 
         try {
-            $breetAsset = BreetAsset::resolve($request->asset, $request->network);
-            $rateData   = $this->breet->getRateCalculator(
+            $breetAsset   = BreetAsset::resolve($request->asset, $request->network);
+            $cryptoAmount = (float) $request->amount;
+
+            $usdPrice    = $this->breet->getCryptoUsdPrice($breetAsset->symbol);
+            $amountInUSD = $cryptoAmount * $usdPrice;
+
+            $rateData = $this->breet->getRateCalculator(
                 $breetAsset->id,
-                (float) $request->amount,
+                $amountInUSD,
                 $request->currency ?? 'ngn'
             );
 
-            // Breet returns NGNAmount for the given amountInUSD,
-            // plus the rate (NGN per USD) and cryptoAmount.
-            // Fees + your markup % are already baked in by Breet.
             return response()->json([
                 'data' => [
                     'asset'         => strtoupper($request->asset),
                     'network'       => $request->network,
-                    'amount'        => (float) $request->amount,
+                    'amount'        => $cryptoAmount,
+                    'usd_value'     => round($amountInUSD, 2),
                     'currency'      => strtoupper($request->currency ?? 'NGN'),
-                    'rate'          => $rateData['rate'],         // NGN per USD
-                    'ngn_amount'    => $rateData['NGNAmount'],    // estimated NGN payout
-                    'crypto_amount' => $rateData['cryptoAmount'], // crypto equivalent of $amount USD
+                    'rate'          => $rateData['rate'],
+                    'ngn_amount'    => $rateData['NGNAmount'],
+                    'crypto_amount' => $rateData['cryptoAmount'],
                     'destination'   => 'your bank account directly',
                     'note'          => 'Final amount is determined by Breet at settlement time.',
                 ],
@@ -72,13 +80,6 @@ class SellController extends Controller
 
     /**
      * POST /api/v1/sell
-     *
-     * Flow:
-     * 1. Resolve Breet asset ID from ticker + network
-     * 2. Generate a permanent deposit address (once per user per asset — reused after)
-     * 3. Breet monitors blockchain; when crypto arrives it converts + settles to user's bank
-     * 4. Your markup % (set on Breet dashboard) is deducted automatically
-     * 5. We record the transaction for history — NO wallet credit needed
      */
     public function initiate(Request $request): JsonResponse
     {
@@ -94,64 +95,86 @@ class SellController extends Controller
         $bankAccount = $user->bankAccounts()->findOrFail($request->bank_account_id);
 
         try {
-            $breetAsset = BreetAsset::resolve($request->asset, $request->network);
-            $cryptoAmt  = (float) $request->amount;
-            $rateData   = $this->breet->getRateCalculator(
+            $breetAsset   = BreetAsset::resolve($request->asset, $request->network);
+            $cryptoAmount = (float) $request->amount;
+
+            $usdPrice    = $this->breet->getCryptoUsdPrice($breetAsset->symbol);
+            $amountInUSD = $cryptoAmount * $usdPrice;
+
+            $rateData = $this->breet->getRateCalculator(
                 $breetAsset->id,
-                $cryptoAmt,
+                $amountInUSD,
                 $request->currency ?? 'ngn'
             );
 
             $transaction = DB::transaction(function () use (
-                $user, $bankAccount, $request, $breetAsset, $cryptoAmt, $rateData
+                $user, $bankAccount, $request, $breetAsset, $cryptoAmount, $amountInUSD, $rateData
             ) {
                 $txn = Transaction::create([
-                    'user_id'        => $user->id,
-                    'wallet_id'      => $user->wallet->id,
-                    'type'           => 'sell',
-                    'entry_type'     => 'debit',
-                    'currency'       => strtoupper($request->currency ?? 'NGN'),
-                    // amount/net_amount updated from Breet's actual settlement on completion
-                    'amount'         => 0,
-                    'net_amount'     => 0,
-                    'crypto_asset'   => strtoupper($request->asset),
-                    'crypto_network' => $request->network,
-                    'crypto_amount'  => $cryptoAmt,
-                    'rate'           => $rateData['rate'] ?? 0,
-                    // Bank account — Breet settles NGN here directly
-                    'bank_account_id'=> $bankAccount->id,
-                    'bank_name'      => $bankAccount->bank_name,
-                    'bank_code'      => $bankAccount->bank_code,
-                    'account_number' => $bankAccount->account_number,
-                    'account_name'   => $bankAccount->account_name,
-                    'status'         => 'awaiting_crypto',
-                    'session_id'     => session()->getId(),
-                    'ip_address'     => request()->ip(),
-                    'user_agent'     => request()->userAgent(),
-                    'rate_locked_at' => now(),
-                    'rate_expires_at'=> now()->addSeconds((int) config('payyigi.rate_lock_seconds', 60)),
-                    'metadata'       => [
+                    'user_id'         => $user->id,
+                    'wallet_id'       => $user->wallet->id,
+                    'type'            => 'sell',
+                    'entry_type'      => 'debit',
+                    'currency'        => strtoupper($request->currency ?? 'NGN'),
+                    'amount'          => 0,
+                    'net_amount'      => 0,
+                    'crypto_asset'    => strtoupper($request->asset),
+                    'crypto_network'  => $request->network,
+                    'crypto_amount'   => $cryptoAmount,
+                    'rate'            => $rateData['rate'] ?? 0,
+                    'bank_account_id' => $bankAccount->id,
+                    'bank_name'       => $bankAccount->bank_name,
+                    'bank_code'       => $bankAccount->bank_code,
+                    'account_number'  => $bankAccount->account_number,
+                    'account_name'    => $bankAccount->account_name,
+                    'status'          => 'awaiting_crypto',
+                    'session_id'      => session()->getId(),
+                    'ip_address'      => request()->ip(),
+                    'user_agent'      => request()->userAgent(),
+                    'rate_locked_at'  => now(),
+                    'rate_expires_at' => now()->addSeconds((int) config('payyigi.rate_lock_seconds', 60)),
+                    'metadata'        => [
                         'estimated_ngn'  => $rateData['NGNAmount']    ?? 0,
-                        'crypto_amount'  => $rateData['cryptoAmount'] ?? $cryptoAmt,
+                        'crypto_amount'  => $rateData['cryptoAmount'] ?? $cryptoAmount,
+                        'usd_value'      => round($amountInUSD, 2),
                         'breet_asset_id' => $breetAsset->id,
                     ],
                 ]);
 
-                // Generate permanent deposit address on Breet with bank linked for auto-settlement.
-                // Breet will deduct your markup % (configured on Breet dashboard) automatically.
-                $breetWallet = app(BreetService::class)->generateDepositAddress(
-                    assetId:       $breetAsset->id,
-                    label:         "user-{$user->id}-{$breetAsset->symbol}",
-                    bankId:        $bankAccount->bank_code,   // Breet bankId = your bank_code
-                    accountNumber: $bankAccount->account_number,
-                    narration:     'PayYigi sell order',
-                );
+                // Breet wallet addresses are PERMANENT and REUSABLE per user per asset.
+                // Check if this user already has a deposit address for this asset — reuse it.
+                $existingWalletTxn = Transaction::where('user_id', $user->id)
+                    ->where('type', 'sell')
+                    ->where('crypto_asset', strtoupper($request->asset))
+                    ->where('crypto_network', $request->network)
+                    ->whereNotNull('deposit_address')
+                    ->whereNotNull('provider_order_id')
+                    ->where('id', '!=', $txn->id)
+                    ->latest()
+                    ->first();
 
-                $txn->update([
-                    'provider_order_id' => $breetWallet['id']      ?? null,
-                    'deposit_address'   => $breetWallet['address']  ?? null,
-                    'provider_response' => $breetWallet,
-                ]);
+                if ($existingWalletTxn) {
+                    // Reuse existing wallet address
+                    $txn->update([
+                        'provider_order_id' => $existingWalletTxn->provider_order_id,
+                        'deposit_address'   => $existingWalletTxn->deposit_address,
+                    ]);
+                } else {
+                    // Generate new permanent deposit address
+                    $breetWallet = app(BreetService::class)->generateDepositAddress(
+                        assetId:       $breetAsset->id,
+                        label:         "user-{$user->id}-{$breetAsset->symbol}",
+                        bankId:        $bankAccount->bank_code,
+                        accountNumber: $bankAccount->account_number,
+                        narration:     'PayYigi sell order',
+                    );
+
+                    $txn->update([
+                        'provider_order_id' => $breetWallet['id']     ?? null,
+                        'deposit_address'   => $breetWallet['address'] ?? null,
+                        'provider_response' => $breetWallet,
+                    ]);
+                }
 
                 return $txn;
             });
@@ -185,9 +208,9 @@ class SellController extends Controller
                         'account_number' => $transaction->account_number,
                         'account_name'   => $transaction->account_name,
                     ],
-                    'note'      => 'We will apply your configured markup and settle net NGN directly to your bank.',
-                    'status'    => $transaction->status,
-                    'expires_at'=> $transaction->rate_expires_at,
+                    'note'       => 'We will apply your configured markup and settle net NGN directly to your bank.',
+                    'status'     => $transaction->status,
+                    'expires_at' => $transaction->rate_expires_at,
                 ],
             ], 201);
 
@@ -216,5 +239,14 @@ class SellController extends Controller
             ->firstOrFail();
 
         return response()->json(['data' => $txn]);
+    }
+
+    public function banks(): JsonResponse
+    {
+        try {
+            return response()->json(['data' => $this->korapay->getBanks()]);
+        } catch (\Exception $e) {
+            return response()->json(['message' => $e->getMessage()], 503);
+        }
     }
 }

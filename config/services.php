@@ -69,4 +69,6 @@ return [
     'company_bank_code'      => env('COMPANY_BANK_CODE'),
     'company_account_name'   => env('COMPANY_ACCOUNT_NAME'),
 
+    'frontend_url' => env('FRONTEND_URL', 'http://localhost:3000'),
+
 ];

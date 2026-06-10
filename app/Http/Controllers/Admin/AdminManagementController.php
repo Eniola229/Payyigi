@@ -13,7 +13,13 @@ class AdminManagementController extends Controller
 {
     public function index(Request $request): JsonResponse
     {
-        $admins = Admin::with('roles')->latest()->get();
+        $perPage = $request->integer('per_page', 15);
+        $perPage = in_array($perPage, [10, 15, 25, 50, 100]) ? $perPage : 15;
+
+        $admins = Admin::with('roles')
+            ->latest()
+            ->paginate(20);
+
         return response()->json(['data' => $admins]);
     }
 

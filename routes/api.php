@@ -14,7 +14,7 @@ use App\Http\Controllers\User\SellController;
 use App\Http\Controllers\User\SwapController;
 use App\Http\Controllers\User\WithdrawController;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Route;
+use Illuminate\Support\Facades\Route; 
 
 // ── Webhooks (no auth) ───────────────────────────────────
 Route::post('/webhooks/korapay', [\App\Http\Controllers\KorapayWebhookController::class, 'handle']);
@@ -37,6 +37,10 @@ Route::prefix('auth')->group(function () {
     Route::post('/two-factor/verify', [TwoFactorController::class, 'verify'])
          ->middleware('throttle:10,5');
 });
+
+        Route::prefix('two-factor')->group(function () {
+            Route::post('/verify',   [TwoFactorController::class, 'verify']);
+        });
 
     // ── Public Admin Auth ─────────────────────────────────────────────────────────
     Route::prefix('admin')->group(function () {
@@ -94,6 +98,9 @@ Route::middleware(['auth:sanctum', 'account.active'])->group(function () {
         Route::post('/virtual-account/generate', [\App\Http\Controllers\User\VirtualAccountController::class, 'generate']);
         Route::get('/virtual-account',           [\App\Http\Controllers\User\VirtualAccountController::class, 'show']);
     });
+
+    //Banks
+    Route::get('/banks', [SellController::class, 'banks']);
  
     // Profile & Wallet
     Route::get('/user/profile', function (Request $r) {
@@ -196,6 +203,11 @@ Route::middleware(['auth:sanctum', 'account.active'])->group(function () {
             // Dashboard — any authenticated admin
             Route::get('/dashboard', \App\Http\Controllers\Admin\DashboardController::class)
                  ->middleware('can:view_dashboard_stats,admin');
+
+            // Profile
+            Route::get('/profile',   \App\Http\Controllers\Admin\Auth\AdminProfileController::class . '@show');
+            Route::patch('/profile', \App\Http\Controllers\Admin\Auth\AdminProfileController::class . '@update');
+            Route::post('/password/change', \App\Http\Controllers\Admin\Auth\AdminProfileController::class . '@changePassword');
  
             // Users
             Route::prefix('users')->middleware('can:view_users,admin')->group(function () {

@@ -22,29 +22,35 @@ class SyncBreetAssets extends Command
             return self::FAILURE;
         }
 
-        $synced = 0;
+        $activeIds = [];
+        $synced    = 0;
 
         foreach ($assets as $asset) {
             BreetAsset::updateOrCreate(
                 ['id' => $asset['id']],
                 [
-                    'symbol'           => strtoupper($asset['symbol']),
-                    'name'             => $asset['name'],
-                    'identifier'       => $asset['identifier'],
-                    'network'          => $asset['network'],
-                    'type'             => $asset['type'],
-                    'icon'             => $asset['icon']             ?? null,
-                    'tx_link'          => $asset['txLink']           ?? null,
-                    'minimum'          => $asset['minimum']          ?? 0,
-                    'flag_fee_usd'     => $asset['flagFeeUSD']       ?? 0,
-                    'is_account_based' => $asset['isAccountBased']   ?? true,
+                    'symbol'           => strtoupper($asset['symbol']          ?? ''),
+                    'name'             => $asset['name']                       ?? '',
+                    'identifier'       => $asset['identifier']                 ?? '',
+                    'network'          => $asset['network']                    ?? null,
+                    'type'             => $asset['type']                       ?? null,
+                    'icon'             => $asset['icon']                       ?? null,
+                    'tx_link'          => $asset['txLink']                     ?? null,
+                    'minimum'          => $asset['minimum']                    ?? 0,
+                    'flag_fee_usd'     => $asset['flagFeeUSD']                 ?? 0,
+                    'is_account_based' => $asset['isAccountBased']             ?? true,
                     'is_active'        => true,
                 ]
             );
+
+            $activeIds[] = $asset['id'];
             $synced++;
         }
 
-        $this->info("Synced {$synced} assets.");
+        $deactivated = BreetAsset::whereNotIn('id', $activeIds)->update(['is_active' => false]);
+
+        $this->info("Synced {$synced} assets. Deactivated {$deactivated} stale assets.");
+
         return self::SUCCESS;
     }
 }

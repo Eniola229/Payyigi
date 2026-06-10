@@ -14,9 +14,10 @@ class KorapayService
     {
         $this->baseUrl   = config('services.korapay.base_url', 'https://api.korapay.com/merchant/api/v1');
         $this->secretKey = config('services.korapay.secret_key');
+        $this->publicKey = config('services.korapay.public_key');
     }
 
-    /**
+    /** 
      * Lookup NIN via Korapay Identity API.
      *
      * Returns the full NIN data including phone_number registered to that NIN.
@@ -143,6 +144,31 @@ class KorapayService
 
         if (!($body['status'] ?? false)) {
             throw new \Exception($body['message'] ?? 'BVN lookup was unsuccessful.');
+        }
+
+        return $body['data'];
+    }
+
+    /**
+     * Fetch all supported Nigerian banks from Korapay.
+     *
+     * @throws \Exception on API failure
+     */
+    public function getBanks(string $countryCode = 'NG'): array
+    {
+        $response = Http::withHeaders([
+            'Authorization' => 'Bearer ' . $this->publicKey,
+            'Content-Type'  => 'application/json',
+        ])->get("{$this->baseUrl}/misc/banks", ['countryCode' => $countryCode]);
+
+        if ($response->failed()) {
+            throw new \Exception($response->json('message') ?? 'Failed to fetch banks.');
+        }
+
+        $body = $response->json();
+
+        if (!($body['status'] ?? false)) {
+            throw new \Exception($body['message'] ?? 'Could not retrieve banks.');
         }
 
         return $body['data'];

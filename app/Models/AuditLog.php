@@ -37,4 +37,19 @@ class AuditLog extends Model
             'session_id' => session()->getId(),
         ], $data));
     }
+
+    public function user(): \Illuminate\Database\Eloquent\Relations\BelongsTo
+    {
+        return $this->belongsTo(\App\Models\User::class, 'user_id');
+    }
+
+    public function admin(): \Illuminate\Database\Eloquent\Relations\BelongsTo
+    {
+        return $this->belongsTo(\App\Models\Admin::class, 'user_id');
+    }
+
+    public function getActorAttribute(): mixed
+    {
+        return $this->user ?? $this->admin;
+    }
 }

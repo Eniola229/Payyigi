@@ -14,37 +14,52 @@ class BreetWebhookController extends Controller
      * POST /webhooks/breet
      *
      * Breet sends a webhook when a deposit is detected on any of your wallets.
-     * The payload contains the wallet ID and a Breet transaction ID.
-     * We match the wallet ID to our transaction, store the Breet transaction ID,
-     * then immediately check the transaction status to complete/fail it.
+     * Verification: compare x-webhook-secret header against your stored secret.
+     *
+     * Payload event types:
+     *   trade.address.created — new wallet address generated (no trade yet)
+     *   trade.pending         — crypto detected on-chain, not yet confirmed
+     *   trade.completed       — confirmed, account credited
+     *   trade.flagged         — below minimum deposit, funds held
      */
     public function handle(Request $request, BreetService $breet): \Illuminate\Http\JsonResponse
     {
-        $rawPayload = $request->getContent();
-        $signature  = $request->header('x-breet-signature') ?? '';
+        // ── VERIFICATION ──────────────────────────────────────────────────────
+        $incomingSecret = $request->header('x-webhook-secret') ?? '';
+        $expectedSecret = config('services.breet.webhook_secret', '');
 
-        // Verify the webhook came from Breet
-        if (!$breet->verifyWebhookSignature($rawPayload, $signature)) {
-            Log::warning('Breet webhook: invalid signature');
-            return response()->json(['message' => 'Invalid signature'], 401);
+        if (empty($expectedSecret) || !hash_equals($expectedSecret, $incomingSecret)) {
+            Log::warning('Breet webhook: invalid secret', [
+                'ip' => $request->ip(),
+            ]);
+            return response()->json(['message' => 'Invalid secret'], 401);
         }
 
-        $payload   = $request->json()->all();
-        $event     = $payload['event']  ?? null;
-        $data      = $payload['data']   ?? [];
-        $walletId  = $data['wallet']    ?? $data['walletId'] ?? null; // Breet wallet ID
-        $breetTxId = $data['id']        ?? null;                      // Breet transaction ID
-        $status    = $data['status']    ?? null;
+        // ── PARSE PAYLOAD ─────────────────────────────────────────────────────
+        $payload = $request->json()->all();
+
+        $event     = $payload['event']   ?? null;
+        $breetTxId = $payload['id']      ?? null;
+        $status    = $payload['status']  ?? null;
+        $walletId  = $payload['vaultId'] ?? null; // vaultId maps to our provider_order_id
 
         Log::info('Breet webhook received', [
             'event'       => $event,
-            'wallet_id'   => $walletId,
             'breet_tx_id' => $breetTxId,
+            'wallet_id'   => $walletId,
             'status'      => $status,
         ]);
 
-        // Find our transaction by the wallet ID (stored as provider_order_id)
+        // ── EARLY RETURN FOR NON-TRADE EVENTS ─────────────────────────────────
+        // trade.address.created fires when a wallet address is generated — no trade yet.
+        if ($event === 'trade.address.created') {
+           
+            return response()->json(['message' => 'Acknowledged'], 200);
+        }
+
+        // ── MATCH TRANSACTION ─────────────────────────────────────────────────
         if (!$walletId) {
+            Log::warning('Breet webhook: no vaultId in payload', ['payload' => $payload]);
             return response()->json(['message' => 'No wallet ID in payload'], 200);
         }
 
@@ -54,25 +69,30 @@ class BreetWebhookController extends Controller
             ->first();
 
         if (!$txn) {
-            Log::info('Breet webhook: no matching pending transaction for wallet', ['wallet_id' => $walletId]);
+            Log::info('Breet webhook: no matching pending transaction', ['wallet_id' => $walletId]);
             return response()->json(['message' => 'No matching transaction'], 200);
         }
 
-        // Store the Breet transaction ID so PollSellStatus can use it
+        // Idempotency — skip if already processed with same Breet tx ID
+        if ($breetTxId && $txn->provider_reference === $breetTxId && $txn->isCompleted()) {
+            return response()->json(['message' => 'Already processed'], 200);
+        }
+
+        // Store Breet transaction ID for polling fallback
         if ($breetTxId && !$txn->provider_reference) {
             $txn->update(['provider_reference' => $breetTxId]);
         }
 
-        // Handle the event
-        if ($status === 'completed') {
-            PollSellStatus::markCompleted($txn->fresh(), $data);
-        } elseif ($status === 'failed') {
-            PollSellStatus::markFailed($txn->fresh(), $data);
-        } else {
-            // processing/pending — update status and let poll job handle completion
-            $txn->update(['status' => 'processing']);
-            PollSellStatus::dispatch($txn)->delay(now()->addSeconds(15));
-        }
+        // ── HANDLE EVENT ──────────────────────────────────────────────────────
+        match ($event) {
+            'trade.completed' => PollSellStatus::markCompleted($txn->fresh(), $payload),
+            'trade.flagged'   => $txn->update(['status' => 'flagged']),
+            'trade.pending'   => (function () use ($txn) {
+                $txn->update(['status' => 'processing']);
+                PollSellStatus::dispatch($txn)->delay(now()->addSeconds(15));
+            })(),
+            default => Log::info('Breet webhook: unhandled event', ['event' => $event]),
+        };
 
         return response()->json(['message' => 'Webhook processed'], 200);
     }

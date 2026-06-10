@@ -221,6 +221,7 @@ class NinVerificationController extends Controller
             'nin_verified'    => true,
             'nin_verified_at' => now(),
             'nin_phone'       => $cached['nin_phone'],
+            'kyc_level' => 'completed',
         ]);
 
         Cache::forget("nin_verification:{$user->id}");

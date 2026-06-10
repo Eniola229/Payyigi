@@ -12,6 +12,7 @@ use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Illuminate\Support\Facades\Hash;
 use Laravel\Sanctum\HasApiTokens;
+use App\Notifications\ResetPasswordNotification;
 
 class User extends Authenticatable implements MustVerifyEmail
 {
@@ -26,7 +27,7 @@ class User extends Authenticatable implements MustVerifyEmail
         'two_factor_enabled', 'two_factor_secret', 'two_factor_recovery_codes',
         'is_active', 'is_suspended', 'suspension_reason', 'suspended_at',
         'referral_code', 'referred_by', 'avatar', 'date_of_birth',
-        'last_login_ip', 'last_login_at', 'last_login_device', 'bvn_verified', 'bvn'
+        'last_login_ip', 'last_login_at', 'last_login_device', 'bvn_verified', 'bvn', 'kyc_level'
     ];
 
     protected $appends = ['full_name', 'has_transaction_pin'];
@@ -146,5 +147,11 @@ class User extends Authenticatable implements MustVerifyEmail
             'locked_balance'     => $this->wallet?->locked_balance ?? 0,
             'pending_balance'    => $this->transactions()->pending()->where('entry_type', 'debit')->sum('amount'),
         ];
+    }
+
+    
+    public function sendPasswordResetNotification($token): void
+    {
+        $this->notify(new ResetPasswordNotification($token));
     }
 }

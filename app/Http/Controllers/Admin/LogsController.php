@@ -1,13 +1,10 @@
 <?php
-
 namespace App\Http\Controllers\Admin;
-
 use App\Http\Controllers\Controller;
 use App\Models\AuditLog;
 use App\Models\WebhookLog;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-
 class LogsController extends Controller
 {
     public function auditLogs(Request $request): JsonResponse
@@ -16,12 +13,21 @@ class LogsController extends Controller
             return response()->json(['message' => 'Unauthorized.'], 403);
         }
 
-        $logs = AuditLog::when($request->event,   fn($q) => $q->where('event', 'like', "%{$request->event}%"))
-            ->when($request->user_id, fn($q) => $q->where('user_id', $request->user_id))
+        $logs = AuditLog::with(['user', 'admin'])
+            ->when($request->event,     fn($q) => $q->where('event', 'like', "%{$request->event}%"))
+            ->when($request->user_id,   fn($q) => $q->where('user_id', $request->user_id))
             ->when($request->date_from, fn($q) => $q->whereDate('created_at', '>=', $request->date_from))
             ->when($request->date_to,   fn($q) => $q->whereDate('created_at', '<=', $request->date_to))
             ->latest()
             ->paginate(50);
+
+        $logs->getCollection()->transform(function ($log) {
+            $log->actor      = $log->user ?? $log->admin;
+            $log->actor_type = $log->user ? 'user' : ($log->admin ? 'admin' : null);
+
+            unset($log->user, $log->admin);
+            return $log;
+        });
 
         return response()->json(['data' => $logs]);
     }

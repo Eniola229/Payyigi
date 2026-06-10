@@ -50,11 +50,47 @@ class BreetService
         return $response->json('data');
     }
 
-    // ── RATES ─────────────────────────────────────────────────────────────────
+    // ── RATES & PRICES ────────────────────────────────────────────────────────
+
+    /**
+     * Get current USD market price for 1 unit of a crypto asset.
+     * Endpoint: GET /trades/pbc/sell/assets/market/converter?from=BTC&to=usd
+     *
+     * Use this to convert a user's crypto amount → USD before calling getRateCalculator.
+     * These are global market prices, not Breet-specific rates.
+     *
+     * Response: { data: { quote: { USD: { price: 105000.00 } } } }
+     */
+    public function getCryptoUsdPrice(string $symbol): float
+    {
+        $response = $this->http()->get("{$this->baseUrl}/trades/pbc/sell/assets/market/converter", [
+            'from' => strtolower($symbol),
+            'to'   => 'usd',
+        ]);
+
+        if ($response->failed()) {
+            Log::error('Breet getCryptoUsdPrice failed', [
+                'symbol' => $symbol,
+                'body'   => $response->json(),
+            ]);
+            throw new \Exception("Unable to fetch USD price for {$symbol}.");
+        }
+
+        $price = $response->json('data.quote.USD.price') ?? null;
+
+        if (!$price) {
+            throw new \Exception("USD price not available for {$symbol}.");
+        }
+
+        return (float) $price;
+    }
 
     /**
      * Get NGN/GHS rate for a given asset + USD amount.
      * Endpoint: POST /trades/pbc/sell/rate-calculator/{assetId}
+     *
+     * IMPORTANT: amountInUSD must be the USD value, NOT the crypto amount.
+     * Use getCryptoUsdPrice() first to convert: cryptoAmount * usdPrice = amountInUSD
      *
      * Your markup % (set on Breet dashboard) is already factored into the rate.
      * Do NOT add any fee on top — Breet handles everything.
