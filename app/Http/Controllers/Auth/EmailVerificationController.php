@@ -59,7 +59,7 @@ class EmailVerificationController extends Controller
 
         $key = 'email_verify_resend|' . $user->id;
 
-        if (RateLimiter::tooManyAttempts($key, 3)) {
+        if (RateLimiter::tooManyAttempts($key, 10)) {
             $seconds = RateLimiter::availableIn($key);
             return response()->json([
                 'message' => "Too many requests. Try again in {$seconds} seconds.",

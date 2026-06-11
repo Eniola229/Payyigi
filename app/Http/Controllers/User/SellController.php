@@ -154,7 +154,7 @@ class SellController extends Controller
                     ->first();
 
                 if ($existingWalletTxn) {
-                    // Reuse existing wallet address
+                    // Reuse existing wallet — same vaultId and address
                     $txn->update([
                         'provider_order_id' => $existingWalletTxn->provider_order_id,
                         'deposit_address'   => $existingWalletTxn->deposit_address,
@@ -169,8 +169,10 @@ class SellController extends Controller
                         narration:     'PayYigi sell order',
                     );
 
+                    // Store vaultId (numeric) as provider_order_id — this is what Breet
+                    // sends in webhook payloads as vaultId for transaction matching.
                     $txn->update([
-                        'provider_order_id' => $breetWallet['id']     ?? null,
+                        'provider_order_id' => $breetWallet['vaultId'] ?? $breetWallet['id'] ?? null,
                         'deposit_address'   => $breetWallet['address'] ?? null,
                         'provider_response' => $breetWallet,
                     ]);

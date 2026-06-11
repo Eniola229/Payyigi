@@ -1,60 +1,50 @@
 <?php
-
 namespace App\Notifications;
 
+use App\Channels\BrevoChannel;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Notifications\Notification;
-use GuzzleHttp\Client;
 
 class ResetPasswordNotification extends Notification implements ShouldQueue
 {
     use Queueable;
 
-    public int $tries = 1;
+    public int $tries     = 3;
+    public int $timeout   = 30;
     public int $uniqueFor = 3600;
 
     public function __construct(protected string $token) {}
 
     public function via(object $notifiable): array
     {
-        return ['mail'];
+        return [BrevoChannel::class];
     }
 
-    public function toMail(object $notifiable): void
+    public function toBrevo(object $notifiable): array
     {
-        $resetUrl = $this->resetUrl($notifiable);
+        $title   = 'Reset Your PayYigi Password';
+        $message = "Hello {$notifiable->first_name}!\n\n"
+            . "We received a request to reset your PayYigi password.\n\n"
+            . "Click the button below to choose a new password. This link expires in 60 minutes.\n\n"
+            . "If you did not request a password reset, no further action is required.";
 
-        $title       = 'Reset Your Password';
-        $message     = "Hello {$notifiable->first_name}!\n\nWe received a request to reset your PayYigi password.\n\nClick the button below to choose a new password. This link expires in 60 minutes.\n\nIf you did not request a password reset, no further action is required.";
-        $button_url  = $resetUrl;
+        $button_url  = $this->resetUrl($notifiable);
         $button_text = 'Reset Password';
 
-        $html = view('emails.template', compact('title', 'message', 'button_url', 'button_text'))->render();
-
-        (new Client())->post('https://api.brevo.com/v3/smtp/email', [
-            'headers' => [
-                'api-key'      => config('services.brevo.key'),
-                'Content-Type' => 'application/json',
-            ],
-            'json' => [
-                'sender' => [
-                    'email' => config('mail.from.address'),
-                    'name'  => config('mail.from.name'),
-                ],
-                'to' => [
-                    ['email' => $notifiable->email, 'name' => $notifiable->first_name],
-                ],
-                'subject'     => 'Reset Your PayYigi Password',
-                'htmlContent' => $html,
-            ],
-        ]);
+        return [
+            'to'          => [['email' => $notifiable->email, 'name' => $notifiable->first_name ?? $notifiable->email]],
+            'subject'     => '🔑 Reset Your PayYigi Password',
+            'htmlContent' => view('emails.template', compact('title', 'message', 'button_url', 'button_text'))->render(),
+        ];
     }
 
     protected function resetUrl(object $notifiable): string
     {
-        return rtrim(config('app.frontend_url'), '/') . '/reset-password'
-            . '?token=' . $this->token
-            . '&email=' . urlencode($notifiable->email);
+        return rtrim(config('app.frontend_url'), '/')
+            . '/reset-password/'
+            . $this->token
+            . '/'
+            . urlencode($notifiable->email);
     }
 }

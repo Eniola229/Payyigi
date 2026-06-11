@@ -26,7 +26,7 @@ class Transaction extends Model
         'bank_account_id', 'bank_name', 'bank_code', 'account_number',
         'account_name', 'bank_transfer_reference', 'transfer_to_user_id',
         'status', 'failure_reason', 'notes', 'rate_locked_at',
-        'rate_expires_at', 'completed_at', 'failed_at', 'metadata',
+        'rate_expires_at', 'completed_at', 'failed_at', 'metadata', 'flagged_at'
     ];
 
     protected $casts = [
@@ -46,6 +46,7 @@ class Transaction extends Model
         'rate_expires_at'=> 'datetime',
         'completed_at'   => 'datetime',
         'failed_at'      => 'datetime',
+        'flagged_at'      => 'datetime',
     ];
 
     // ─── Boot ────────────────────────────────────────────────────────────────

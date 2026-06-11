@@ -2,39 +2,52 @@
 
 namespace App\Notifications;
 
+use App\Channels\BrevoChannel;
 use App\Models\Transaction;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
-use Illuminate\Notifications\Messages\MailMessage;
 use Illuminate\Notifications\Notification;
 
 class TransactionFailedNotification extends Notification implements ShouldQueue
 {
     use Queueable;
 
+    public int $tries   = 3;
+    public int $timeout = 30;
+
     public function __construct(private readonly Transaction $transaction) {}
 
     public function via(object $notifiable): array
     {
-        return ['mail'];
+        return [BrevoChannel::class];
     }
 
-    public function toMail(object $notifiable): MailMessage
+    public function toBrevo(object $notifiable): array
     {
-        $t    = $this->transaction;
-        $type = ucfirst($t->type);
+        $txn  = $this->transaction;
+        $type = ucfirst($txn->type);
 
-        return (new MailMessage)
-            ->subject("❌ {$type} Failed — PayYigi")
-            ->greeting("Hello {$notifiable->first_name},")
-            ->line("Unfortunately, your {$t->type} transaction could not be completed.")
-            ->line("**Reference:** {$t->reference}")
-            ->line("**Amount:** ₦" . number_format($t->amount, 2))
-            ->when($t->failure_reason, fn($m) => $m->line("**Reason:** {$t->failure_reason}"))
-            ->when($t->type === 'withdraw', fn($m) => $m
-                ->line('Your wallet has been refunded automatically.')
-            )
-            ->line('If you have any questions, please contact our support team.')
-            ->salutation('The PayYigi Team');
+        $title   = "Your {$type} Transaction Has Failed";
+        $message = "Hello {$notifiable->first_name},\n\n"
+            . "Unfortunately, your {$txn->type} transaction could not be completed.\n\n"
+            . "Transaction Details:\n"
+            . "• Reference: {$txn->reference}\n"
+            . "• Amount: ₦" . number_format($txn->amount, 2) . "\n"
+            . ($txn->failure_reason ? "• Reason: {$txn->failure_reason}\n" : '')
+            . "\n"
+            . ($txn->type === 'withdraw'
+                ? "Your wallet balance has been refunded automatically. The funds should already be available in your account.\n\n"
+                : '')
+            . "If you believe this is an error or need further assistance, please don't hesitate to reach out to our support team with your transaction reference.\n\n"
+            . "We apologise for any inconvenience caused.";
+
+        $button_url  = config('app.url') . '/support';
+        $button_text = 'Contact Support';
+
+        return [
+            'to'          => [['email' => $notifiable->email, 'name' => $notifiable->first_name ?? $notifiable->email]],
+            'subject'     => "❌ {$type} Failed — PayYigi",
+            'htmlContent' => view('emails.template', compact('title', 'message', 'button_url', 'button_text'))->render(),
+        ];
     }
 }
