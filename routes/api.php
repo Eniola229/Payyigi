@@ -20,6 +20,8 @@ use Illuminate\Support\Facades\Route;
 Route::post('/webhooks/korapay', [\App\Http\Controllers\KorapayWebhookController::class, 'handle']);
 Route::post('/webhooks/breet', [\App\Http\Controllers\BreetWebhookController::class, 'handle']);
 
+
+Route::get('/sell/assets',       [SellController::class, 'assets']);
 // ── Public Auth ──────────────────────────────────────────────────────────────
 Route::prefix('auth')->group(function () {
     Route::post('/register', RegisterController::class);
@@ -168,7 +170,7 @@ Route::middleware(['auth:sanctum', 'account.active'])->group(function () {
         });
 
         // Sell — credits wallet on completion
-        Route::get('/sell/assets',       [SellController::class, 'assets']);
+        
         Route::post('/sell/rate',       [SellController::class, 'getRate']);
         Route::post('/sell',           [SellController::class, 'initiate'])->middleware('txn.pin');
         Route::get('/sell/history',    [SellController::class, 'history']);

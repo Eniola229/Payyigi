@@ -26,7 +26,13 @@ class Transaction extends Model
         'bank_account_id', 'bank_name', 'bank_code', 'account_number',
         'account_name', 'bank_transfer_reference', 'transfer_to_user_id',
         'status', 'failure_reason', 'notes', 'rate_locked_at',
-        'rate_expires_at', 'completed_at', 'failed_at', 'metadata', 'flagged_at'
+        'rate_expires_at', 'completed_at', 'failed_at', 'metadata', 'flagged_at',
+        'breet_wallet_id',
+        'breet_vault_id',
+        // New payout fields
+        'provider_payout_id',
+        'provider_payout_status',
+        'payout_completed_at',
     ];
 
     protected $casts = [
@@ -47,6 +53,7 @@ class Transaction extends Model
         'completed_at'   => 'datetime',
         'failed_at'      => 'datetime',
         'flagged_at'      => 'datetime',
+        'payout_completed_at' => 'datetime', // Add this cast
     ];
 
     // ─── Boot ────────────────────────────────────────────────────────────────

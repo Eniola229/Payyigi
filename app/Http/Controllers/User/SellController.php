@@ -10,6 +10,7 @@ use App\Services\Breet\BreetService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use App\Services\Korapay\KorapayService;
 
 class SellController extends Controller
@@ -32,51 +33,55 @@ class SellController extends Controller
     }
 
     /**
-     * GET /api/v1/sell/rate?asset=BTC&network=Bitcoin&amount=0.001&currency=ngn
-     *
-     * `amount` is in CRYPTO units (e.g. 0.001 BTC).
-     * We convert to USD first, then call Breet's rate calculator.
+     * GET /api/v1/sell/rate?asset=BTC&network=Bitcoin&amount=21.00&currency=ngn
+     * `amount` is USD value.
      */
-    public function getRate(Request $request): JsonResponse
-    {
-        $request->validate([
-            'asset'    => 'required|string',
-            'network'  => 'required|string',
-            'amount'   => 'required|numeric|min:0.000001',
-            'currency' => 'sometimes|string|in:ngn,ghs',
-        ]);
+public function getRate(Request $request): JsonResponse
+{
+    $request->validate([
+        'asset'    => 'required|string',
+        'network'  => 'required|string',
+        'amount'   => 'required|numeric|min:0.01',
+        'currency' => 'sometimes|string|in:ngn,ghs',
+    ]);
 
-        try {
-            $breetAsset   = BreetAsset::resolve($request->asset, $request->network);
-            $cryptoAmount = (float) $request->amount;
+    try {
+        $breetAsset  = BreetAsset::resolve($request->asset, $request->network);
+        $amountInUSD = (float) $request->amount;
 
-            $usdPrice    = $this->breet->getCryptoUsdPrice($breetAsset->symbol);
-            $amountInUSD = $cryptoAmount * $usdPrice;
-
-            $rateData = $this->breet->getRateCalculator(
-                $breetAsset->id,
-                $amountInUSD,
-                $request->currency ?? 'ngn'
-            );
-
+        // Check against asset minimum (stored in USD on breet_assets table)
+        if ($amountInUSD < (float) $breetAsset->minimum) {
             return response()->json([
-                'data' => [
-                    'asset'         => strtoupper($request->asset),
-                    'network'       => $request->network,
-                    'amount'        => $cryptoAmount,
-                    'usd_value'     => round($amountInUSD, 2),
-                    'currency'      => strtoupper($request->currency ?? 'NGN'),
-                    'rate'          => $rateData['rate'],
-                    'ngn_amount'    => $rateData['NGNAmount'],
-                    'crypto_amount' => $rateData['cryptoAmount'],
-                    'destination'   => 'your bank account directly',
-                    'note'          => 'Final amount is determined by Breet at settlement time.',
+                'message' => "Minimum amount for {$breetAsset->name} is \${$breetAsset->minimum} USD.",
+                'errors'  => [
+                    'amount' => ["Amount must be at least \${$breetAsset->minimum} USD for {$breetAsset->name}."],
                 ],
-            ]);
-        } catch (\Exception $e) {
-            return response()->json(['message' => $e->getMessage()], 503);
+            ], 422);
         }
+
+        $rateData = $this->breet->getRateCalculator(
+            $breetAsset->id,
+            $amountInUSD,
+            $request->currency ?? 'ngn'
+        );
+
+        return response()->json([
+            'data' => [
+                'asset'         => strtoupper($request->asset),
+                'network'       => $request->network,
+                'usd_value'     => $amountInUSD,
+                'currency'      => strtoupper($request->currency ?? 'NGN'),
+                'rate'          => $rateData['rate'],
+                'ngn_amount'    => $rateData['NGNAmount'],
+                'crypto_amount' => $rateData['cryptoAmount'],
+                'minimum'       => $breetAsset->minimum,
+                'note'          => 'Final amount is determined by Breet at settlement time.',
+            ],
+        ]);
+    } catch (\Exception $e) {
+        return response()->json(['message' => $e->getMessage()], 503);
     }
+}
 
     /**
      * POST /api/v1/sell
@@ -135,46 +140,73 @@ class SellController extends Controller
                     'rate_expires_at' => now()->addSeconds((int) config('payyigi.rate_lock_seconds', 60)),
                     'metadata'        => [
                         'estimated_ngn'  => $rateData['NGNAmount']    ?? 0,
-                        'crypto_amount'  => $rateData['cryptoAmount'] ?? $cryptoAmount,
                         'usd_value'      => round($amountInUSD, 2),
                         'breet_asset_id' => $breetAsset->id,
                     ],
                 ]);
 
-                // Breet wallet addresses are PERMANENT and REUSABLE per user per asset.
-                // Check if this user already has a deposit address for this asset — reuse it.
+                // ── WALLET REUSE ──────────────────────────────────────────────
+                // Breet addresses are permanent and reusable per user per asset.
+                // If this user already has a generated wallet for this asset,
+                // reuse it. Match on breet_wallet_id (not null = successfully stored).
                 $existingWalletTxn = Transaction::where('user_id', $user->id)
                     ->where('type', 'sell')
                     ->where('crypto_asset', strtoupper($request->asset))
                     ->where('crypto_network', $request->network)
+                    ->whereNotNull('breet_wallet_id')
+                    ->whereNotNull('breet_vault_id')
                     ->whereNotNull('deposit_address')
-                    ->whereNotNull('provider_order_id')
                     ->where('id', '!=', $txn->id)
                     ->latest()
                     ->first();
 
                 if ($existingWalletTxn) {
-                    // Reuse existing wallet — same vaultId and address
+                    // Reuse — carry over all three Breet identifiers
                     $txn->update([
-                        'provider_order_id' => $existingWalletTxn->provider_order_id,
-                        'deposit_address'   => $existingWalletTxn->deposit_address,
+                        'breet_wallet_id' => $existingWalletTxn->breet_wallet_id,
+                        'breet_vault_id'  => $existingWalletTxn->breet_vault_id,
+                        'deposit_address' => $existingWalletTxn->deposit_address,
+                    ]);
+
+                    Log::info('Breet wallet reused for sell order', [
+                        'reference'       => $txn->reference,
+                        'breet_wallet_id' => $existingWalletTxn->breet_wallet_id,
+                        'breet_vault_id'  => $existingWalletTxn->breet_vault_id,
+                        'deposit_address' => $existingWalletTxn->deposit_address,
                     ]);
                 } else {
-                    // Generate new permanent deposit address
+                    // ── GENERATE NEW WALLET ───────────────────────────────────
+                    // generateDepositAddress() now returns unwrapped data:
+                    //   ['wallet_id' => '...', 'vault_id' => '...', 'address' => '...', 'raw' => [...]]
                     $breetWallet = app(BreetService::class)->generateDepositAddress(
-                        assetId:       $breetAsset->id,
-                        label:         "user-{$user->id}-{$breetAsset->symbol}",
-                        bankId:        $bankAccount->bank_code,
-                        accountNumber: $bankAccount->account_number,
-                        narration:     'PayYigi sell order',
+                        assetId:        $breetAsset->id,
+                        label:          "user-{$user->id}-{$breetAsset->symbol}",
+                        bankId:         $bankAccount->bank_code,
+                        accountNumber:  $bankAccount->account_number,
+                        narration:      'PayYigi sell order',
+                        autoSettlement: true,
                     );
 
-                    // Store vaultId (numeric) as provider_order_id — this is what Breet
-                    // sends in webhook payloads as vaultId for transaction matching.
+                    // generateDepositAddress() throws if data is missing,
+                    // but double-check here before writing to DB.
+                    if (empty($breetWallet['wallet_id']) || empty($breetWallet['address'])) {
+                        throw new \RuntimeException(
+                            'Breet wallet generation returned unusable data: ' . json_encode($breetWallet)
+                        );
+                    }
+
                     $txn->update([
-                        'provider_order_id' => $breetWallet['vaultId'] ?? $breetWallet['id'] ?? null,
-                        'deposit_address'   => $breetWallet['address'] ?? null,
-                        'provider_response' => $breetWallet,
+                        'breet_wallet_id'  => $breetWallet['wallet_id'], // MongoDB ObjectId
+                        'breet_vault_id'   => $breetWallet['vault_id'],  // numeric string for webhook matching
+                        'deposit_address'  => $breetWallet['address'],
+                        'provider_response'=> $breetWallet['raw'],
+                    ]);
+
+                    Log::info('Breet wallet generated for sell order', [
+                        'reference'       => $txn->reference,
+                        'breet_wallet_id' => $breetWallet['wallet_id'],
+                        'breet_vault_id'  => $breetWallet['vault_id'],
+                        'deposit_address' => $breetWallet['address'],
                     ]);
                 }
 
@@ -197,7 +229,7 @@ class SellController extends Controller
             ]);
 
             return response()->json([
-                'message' => 'Sell order created. Send your crypto to the address below. NGN will be sent directly to your bank account.',
+                'message' => 'Sell order created. Send your crypto to the address below.',
                 'data'    => [
                     'reference'       => $transaction->reference,
                     'asset'           => $transaction->crypto_asset,
@@ -210,13 +242,17 @@ class SellController extends Controller
                         'account_number' => $transaction->account_number,
                         'account_name'   => $transaction->account_name,
                     ],
-                    'note'       => 'We will apply your configured markup and settle net NGN directly to your bank.',
                     'status'     => $transaction->status,
                     'expires_at' => $transaction->rate_expires_at,
                 ],
             ], 201);
 
         } catch (\Exception $e) {
+            Log::error('SellController::initiate failed', [
+                'user_id' => $user->id ?? null,
+                'error'   => $e->getMessage(),
+                'trace'   => $e->getTraceAsString(),
+            ]);
             return response()->json(['message' => $e->getMessage()], 422);
         }
     }

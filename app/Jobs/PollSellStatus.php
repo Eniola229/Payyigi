@@ -8,7 +8,7 @@ use App\Services\Breet\BreetService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
-use Illuminate\Queue\InteractsWithQueue;
+use Illuminate\Queue\InteractsWithQueue; 
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
 
@@ -26,27 +26,23 @@ class PollSellStatus implements ShouldQueue
         $txn = $this->transaction->fresh();
         if (!$txn || $txn->isCompleted() || $txn->isFailed()) return;
 
-        if (!$txn->provider_order_id) {
-            Log::warning('PollSellStatus: no provider_order_id', ['reference' => $txn->reference]);
+        if (empty($txn->breet_wallet_id)) {
+            Log::warning('PollSellStatus: breet_wallet_id not set — wallet was never stored', [
+                'reference' => $txn->reference,
+            ]);
             return;
         }
 
         try {
-            // provider_order_id = Breet wallet ID.
-            // We poll the WALLET to see if it has received any trades.
-            // GET /trades/wallets/{id}
-            $wallet = $breet->getWallet($txn->provider_order_id);
-
-            // The wallet response tells us the wallet is active/exists,
-            // but does NOT tell us trade status — that comes via webhook.
-            // This job is just a safety net; webhooks are the primary trigger.
-            //
-            // If wallet has trades (breet_transaction_id stored from webhook),
-            // we check the specific transaction instead.
+            // ── PATH A: Breet transaction ID already known ─────────────────────
             if (!empty($txn->provider_reference)) {
-                // provider_reference = Breet transaction ID (set by webhook handler)
                 $data   = $breet->getTransaction($txn->provider_reference);
                 $status = $data['status'] ?? 'pending';
+
+                Log::info('PollSellStatus: polled Breet transaction', [
+                    'reference'    => $txn->reference,
+                    'breet_status' => $status,
+                ]);
 
                 if ($status === 'completed') {
                     self::markCompleted($txn, $data);
@@ -54,17 +50,28 @@ class PollSellStatus implements ShouldQueue
                 }
 
                 if ($status === 'failed') {
-                    self::markFailed($txn, $data);
+                    self::markFailed($txn, ['reason' => $data['reason'] ?? 'Transaction failed.']);
                     return;
                 }
+
+                $this->release(30);
+                return;
             }
 
-            // No transaction yet — crypto hasn't arrived. Retry later.
+            // ── PATH B: No Breet transaction ID yet ────────────────────────────
+            $wallet = $breet->getWallet($txn->breet_wallet_id);
+
+            Log::info('PollSellStatus: wallet active, awaiting deposit', [
+                'reference'      => $txn->reference,
+                'breet_wallet_id'=> $txn->breet_wallet_id,
+                'breet_vault_id' => $txn->breet_vault_id,
+                'address'        => $wallet['address'] ?? null,
+            ]);
 
             $this->release(30);
 
         } catch (\Exception $e) {
-            Log::error('PollSellStatus failed', [
+            Log::error('PollSellStatus: error', [
                 'reference' => $txn->reference,
                 'error'     => $e->getMessage(),
             ]);
@@ -72,13 +79,19 @@ class PollSellStatus implements ShouldQueue
         }
     }
 
+    /**
+     * Mark a sell transaction as completed.
+     */
     public static function markCompleted(Transaction $txn, array $data): void
     {
-        $amountSettled  = $data['amount']         ?? 0;
-        $feeAmount      = $data['feeAmount']      ?? 0;
-        $rate           = $data['rate']           ?? 0;
-        $cryptoReceived = $data['cryptoReceived'] ?? $txn->crypto_amount;
-        $txHash         = $data['txHash']         ?? null;
+        $amountSettled  = $data['amountSettled']  ?? $data['amount']         ?? 0;
+        $feeAmount      = $data['feeAmountInUsd'] ?? $data['feeAmount']      ?? 0;
+        $rate           = $data['settlementRate'] ?? $data['rate']           ?? 0;
+        $cryptoReceived = $data['cryptoAmount']   ?? $data['cryptoReceived'] ?? $txn->crypto_amount;
+        $txHash         = $data['txHash']                                     ?? null;
+        $markupPercent  = $data['markupPercent']                              ?? null;
+        $markupAmount   = $data['markupAmount']                               ?? null;
+        $flagFeeUSD     = $data['flagFeeUSD']                                 ?? 0;
 
         $txn->update([
             'status'       => 'completed',
@@ -87,12 +100,16 @@ class PollSellStatus implements ShouldQueue
             'net_amount'   => $amountSettled,
             'provider_fee' => $feeAmount,
             'rate'         => $rate,
+            'crypto_tx_hash' => $txHash,
             'metadata'     => array_merge((array) ($txn->metadata ?? []), [
                 'amount_settled'  => $amountSettled,
-                'breet_fee'       => $feeAmount,
+                'breet_fee_usd'   => $feeAmount,
                 'settlement_rate' => $rate,
                 'crypto_received' => $cryptoReceived,
                 'tx_hash'         => $txHash,
+                'markup_percent'  => $markupPercent,
+                'markup_amount'   => $markupAmount,
+                'flag_fee_usd'    => $flagFeeUSD,
             ]),
         ]);
 
