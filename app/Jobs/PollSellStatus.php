@@ -45,7 +45,7 @@ class PollSellStatus implements ShouldQueue
                 ]);
 
                 if ($status === 'completed') {
-                    self::markCompleted($txn, $data);
+                    self::markCompleted($txn, $data, $breet);
                     return;
                 }
 
@@ -80,9 +80,10 @@ class PollSellStatus implements ShouldQueue
     }
 
     /**
-     * Mark a sell transaction as completed.
+     * Mark a sell transaction as completed, and trigger the bank payout
+     * if it hasn't been triggered yet (idempotent via provider_payout_id).
      */
-    public static function markCompleted(Transaction $txn, array $data): void
+    public static function markCompleted(Transaction $txn, array $data, BreetService $breet): void
     {
         $amountSettled  = $data['amountSettled']  ?? $data['amount']         ?? 0;
         $feeAmount      = $data['feeAmountInUsd'] ?? $data['feeAmount']      ?? 0;
@@ -93,15 +94,60 @@ class PollSellStatus implements ShouldQueue
         $markupAmount   = $data['markupAmount']                               ?? null;
         $flagFeeUSD     = $data['flagFeeUSD']                                 ?? 0;
 
+        // ── TRIGGER PAYOUT IF NOT ALREADY DONE ──────────────────────────────
+        // This is the single choke point for payout creation — whichever path
+        // (webhook or poll job) detects completion first triggers it exactly once.
+        if (empty($txn->provider_payout_id)) {
+            if ($amountSettled <= 0) {
+                Log::error('markCompleted: cannot trigger payout, settlement amount is 0', [
+                    'reference' => $txn->reference,
+                ]); 
+            } else {
+            try {
+                $breetBankId = $breet->resolveBankIdFromCode($txn->bank_code);
+
+                if (!$breetBankId) {
+                    throw new \Exception("Could not resolve Breet bank id for bank code '{$txn->bank_code}'.");
+                }
+
+                // Verify first — Breet requires this before addBank() will accept the account
+                $verified = $breet->verifyBankAccount($breetBankId, $txn->account_number);
+
+                $bank = $breet->addBank($breetBankId, $txn->account_number, "PayYigi sell #{$txn->reference}");
+                    $payoutResult = $breet->withdrawToBank(
+                        savedBankId: $bank['id'],
+                        amount: $amountSettled,
+                        externalId: $txn->reference,
+                        narration: "PayYigi sell order #{$txn->reference}",
+                    );
+                    $txn->update([
+                        'provider_payout_id'     => $payoutResult['id'] ?? null,
+                        'provider_payout_status' => $payoutResult['status'] ?? 'pending',
+                    ]);
+
+                    Log::info('Payout triggered from markCompleted', [
+                        'reference' => $txn->reference,
+                        'payout_id' => $payoutResult['id'] ?? null,
+                    ]);
+                } catch (\Exception $e) {
+                    Log::error('markCompleted: failed to trigger payout', [
+                        'reference' => $txn->reference,
+                        'error'     => $e->getMessage(),
+                    ]);
+                    $txn->update(['provider_payout_status' => 'pending_retry']);
+                }
+            }
+        }
+
         $txn->update([
-            'status'       => 'completed',
-            'completed_at' => now(),
-            'amount'       => $amountSettled,
-            'net_amount'   => $amountSettled,
-            'provider_fee' => $feeAmount,
-            'rate'         => $rate,
+            'status'         => 'completed',
+            'completed_at'   => now(),
+            'amount'         => $amountSettled,
+            'net_amount'     => $amountSettled,
+            'provider_fee'   => $feeAmount,
+            'rate'           => $rate,
             'crypto_tx_hash' => $txHash,
-            'metadata'     => array_merge((array) ($txn->metadata ?? []), [
+            'metadata'       => array_merge((array) ($txn->metadata ?? []), [
                 'amount_settled'  => $amountSettled,
                 'breet_fee_usd'   => $feeAmount,
                 'settlement_rate' => $rate,
@@ -127,10 +173,17 @@ class PollSellStatus implements ShouldQueue
 
         $txn->user->notify(new \App\Notifications\TransactionCompletedNotification($txn));
 
+        // Start monitoring the payout now that it's (hopefully) been created.
+        $fresh = $txn->fresh();
+        if (!empty($fresh->provider_payout_id)) {
+            \App\Jobs\MonitorPayoutStatus::dispatch($fresh)->delay(now()->addSeconds(30));
+        }
+
         Log::info('Sell completed', [
             'reference'      => $txn->reference,
             'amount_settled' => $amountSettled,
             'tx_hash'        => $txHash,
+            'payout_id'      => $fresh->provider_payout_id,
         ]);
     }
 

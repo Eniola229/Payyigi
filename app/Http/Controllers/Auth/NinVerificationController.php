@@ -77,11 +77,11 @@ class NinVerificationController extends Controller
         // ── Step 2: Extract phone from Korapay response ───────────────────────
         $ninPhone = $ninData['phone_number'] ?? null;
 
-        Log::info('NIN lookup phone number', [
-            'user_id'              => $user->id,
-            'nin_last4'            => substr($request->nin, -4),
-            'returned_phone_last4' => $ninPhone ? substr($ninPhone, -4) : 'null',
-        ]);
+        // Log::info('NIN lookup phone number', [
+        //     'user_id'              => $user->id,
+        //     'nin_last4'            => substr($request->nin, -4),
+        //     'returned_phone_last4' => $ninPhone ? substr($ninPhone, -4) : 'null',
+        // ]);
 
         if (!$ninPhone) {
             return response()->json([

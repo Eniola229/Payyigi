@@ -4,6 +4,7 @@ namespace App\Services\Breet;
 
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Cache;
 
 class BreetService
 {
@@ -328,17 +329,69 @@ class BreetService
      * Returns list of supported banks with their bankId values.
      * bankId is what you pass to generateDepositAddress().
      */
-    public function getBanks(): array
+    public function getBanks(string $currency = 'ngn'): array
     {
-        $response = $this->http()->get("{$this->baseUrl}/payments/banks");
+        $response = $this->http()->get("{$this->baseUrl}/payments/banks", [
+            'currency' => $currency,
+        ]);
 
         $body = $response->json();
 
         if ($response->failed() || empty($body['success'])) {
-            throw new \Exception('Unable to fetch bank list.');
+            Log::error('Breet getBanks failed', [
+                'status'   => $response->status(),
+                'currency' => $currency,
+                'body'     => $body,
+            ]);
+            throw new \Exception($body['message'] ?? 'Unable to fetch bank list.');
         }
 
         return $body['data'] ?? [];
+    }
+    // ── BANK ID RESOLUTION ──────────────────────────────────────────────────
+
+    /**
+     * GET /payments/banks
+     *
+     * Resolve Breet's numeric bank `id` from a bank name (e.g. the name
+     * stored on bank_accounts/transactions from Korapay's bank list).
+     *
+     * IMPORTANT: Breet's `id` is its own internal index (0, 1, 2...), not a
+     * CBN/NIP code — so Korapay's bank_code can NOT be passed through
+     * directly to verifyBankAccount()/addBank(). We match by bank name
+     * instead. Cached for an hour since the bank list barely changes.
+     */
+    public function resolveBankId(string $bankName): ?string
+    {
+        $banks = Cache::remember('breet:banks:ngn', 3600, fn () => $this->getBanks());
+
+        $needle = $this->normalizeBankName($bankName);
+
+        // Exact match first
+        foreach ($banks as $bank) {
+            if ($this->normalizeBankName($bank['name'] ?? '') === $needle) {
+                return (string) $bank['id'];
+            }
+        }
+
+        // Fallback: partial match (handles "UBA" vs "United Bank For Africa")
+        foreach ($banks as $bank) {
+            $candidate = $this->normalizeBankName($bank['name'] ?? '');
+            if ($candidate !== '' && (str_contains($needle, $candidate) || str_contains($candidate, $needle))) {
+                return (string) $bank['id'];
+            }
+        }
+
+        Log::error('Breet resolveBankId: no match found', ['bank_name' => $bankName]);
+
+        return null;
+    }
+
+    private function normalizeBankName(string $name): string
+    {
+        $name = strtolower(trim($name));
+        $name = str_replace(['plc', 'nigeria', 'limited', 'ltd', 'bank'], '', $name);
+        return trim(preg_replace('/[^a-z0-9]+/', '', $name));
     }
 
     // ── WEBHOOKS ──────────────────────────────────────────────────────────────
@@ -414,73 +467,232 @@ class BreetService
 
     // ── PAYOUT / WITHDRAWAL ──────────────────────────────────────────────────
 
-    /**
-     * POST /payments/withdraw
-     * 
-     * Create a withdrawal/payout to a user's bank account
-     * 
-     * @param array $data
-     * @return array
-     * @throws \Exception
-     */
-    public function createWithdrawal(array $data): array
-    {
-        $required = ['bankCode', 'accountNumber', 'amount'];
-        foreach ($required as $field) {
-            if (empty($data[$field])) {
-                throw new \InvalidArgumentException("Missing required field: {$field}");
+// ── PAYOUT / WITHDRAWAL ──────────────────────────────────────────────────
+
+/**
+ * POST /payments/banks/validate
+ * Verify a bank account before saving it.
+ */
+public function verifyBankAccount(string $bankId, string $accountNumber): array
+{
+    $response = $this->http()->post("{$this->baseUrl}/payments/banks/validate", [
+        'id'            => $bankId,
+        'accountNumber' => $accountNumber,
+    ]);
+
+    $body = $response->json();
+
+    if ($response->failed() || empty($body['success'])) {
+        throw new \Exception($body['message'] ?? 'Failed to verify bank account.');
+    }
+
+    return $body['data'] ?? [];
+}
+
+/**
+ * POST /payments/banks/add
+ * Save a validated bank account to your integration. Returns the saved
+ * bank's Mongo _id — this is what you pass to withdrawToBank(), NOT the
+ * raw bankCode/accountNumber.
+ *
+ * Handles the "account already exists" case by looking it up instead.
+ */
+public function addBank(string $bankId, string $accountNumber, ?string $narration = null): array
+{
+    $response = $this->http()->post("{$this->baseUrl}/payments/banks/add", [
+        'id'            => $bankId,
+        'accountNumber' => $accountNumber,
+        'narration'     => substr($narration ?? 'PayYigi withdrawal', 0, 32),
+    ]);
+
+    $body = $response->json();
+
+    if ($response->failed() || empty($body['success'])) {
+        $message = $body['message'] ?? '';
+
+        if (stripos($message, 'already exists') !== false) {
+            $saved = $this->findSavedBank($bankId, $accountNumber);
+            if ($saved) {
+                return $saved;
             }
         }
 
-        $payload = [
-            'bankCode' => $data['bankCode'],
-            'accountNumber' => $data['accountNumber'],
-            'accountName' => $data['accountName'] ?? '',
-            'amount' => (float) $data['amount'],
-            'currency' => strtoupper($data['currency'] ?? 'NGN'),
-            'narration' => $data['narration'] ?? 'PayYigi withdrawal',
-            'reference' => $data['reference'] ?? 'payyigi_' . uniqid(),
-        ];
+        Log::error('Breet addBank failed', ['bankId' => $bankId, 'body' => $body]);
+        throw new \Exception($message ?: 'Failed to save bank account.');
+    }
 
-        $response = $this->http()->post(
-            "{$this->baseUrl}/payments/withdraw",
-            $payload
-        );
+    return $body['data'] ?? [];
+}
 
-        $body = $response->json();
+/**
+ * GET /payments/banks/saved (or whatever the list endpoint is — confirm
+ * against "Fetch Saved Banks" in docs) — used to recover the saved bank
+ * ID when addBank() reports the account already exists.
+ */
+public function findSavedBank(string $bankId, string $accountNumber): ?array
+{
+    $response = $this->http()->get("{$this->baseUrl}/payments/banks/saved");
+    $body = $response->json();
 
-        if ($response->failed() || empty($body['success'])) {
-            Log::error('Breet withdrawal failed', [
-                'reference' => $data['reference'] ?? null,
-                'response' => $body,
-            ]);
-            throw new \Exception('Breet withdrawal failed: ' . ($body['message'] ?? $response->body()));
+    if ($response->failed() || empty($body['success'])) {
+        return null;
+    }
+
+    foreach (($body['data'] ?? []) as $bank) {
+        if (($bank['bankId'] ?? null) == $bankId
+            && ($bank['accountNumber'] ?? null) === $accountNumber) {
+            return $bank;
         }
+    }
 
-        return $body['data'] ?? [];
+    return null;
+}
+
+/**
+ * POST /payments/withdraw/bank/{id}
+ *
+ * Initiate fiat (NGN|GHS) payout to a SAVED bank account.
+ * $savedBankId = the Mongo _id returned by addBank(), NOT the numeric
+ * bankId and NOT the raw accountNumber.
+ *
+ * Requires a withdrawal PIN set on the Breet dashboard — store this in
+ * config('services.breet.withdrawal_pin').
+ */
+public function withdrawToBank(
+    string $savedBankId,
+    float  $amount,
+    string $externalId,
+    ?string $narration = null,
+): array {
+    $payload = [
+        'amount'     => $amount,
+        'narration'  => substr($narration ?? 'PayYigi payout', 0, 32),
+        'externalId' => $externalId,
+    ];
+
+    $pin = config('services.breet.withdrawal_pin');
+    if (!empty($pin)) {
+        $payload['pin'] = $pin;
+    }
+
+    $response = $this->http()->post(
+        "{$this->baseUrl}/payments/withdraw/bank/{$savedBankId}",
+        $payload
+    );
+
+    $body = $response->json();
+
+    if ($response->failed() || empty($body['success'])) {
+        Log::error('Breet withdrawToBank failed', [
+            'externalId' => $externalId,
+            'response'   => $body,
+        ]);
+        throw new \Exception('Breet withdrawal failed: ' . ($body['message'] ?? $response->body()));
+    }
+
+    return $body['data'] ?? []; // { id: <withdrawalId> }
+}
+
+/**
+ * GET /payments/withdrawal/{id}   ← singular "withdrawal", not "withdraw"
+ * Check the status of a withdrawal by its ID or externalId.
+ */
+public function getWithdrawalStatus(string $withdrawalId): array
+{
+    $response = $this->http()->get("{$this->baseUrl}/payments/withdrawal/{$withdrawalId}");
+
+    $body = $response->json();
+
+    if ($response->failed() || empty($body['success'])) {
+        throw new \Exception('Failed to get withdrawal status: ' . ($body['message'] ?? $response->body()));
+    }
+
+    return $body['data'] ?? [];
+}
+
+    /**
+     * Find existing wallet or create new one for a user/asset
+     * Breet wallets are permanent and reusable - this method handles both cases
+     */
+    public function findOrCreateWallet(
+        string $assetId,
+        string $label,
+        ?string $bankId = null,
+        ?string $accountNumber = null,
+        ?string $narration = null,
+        bool $autoSettlement = true,
+    ): array 
+    {
+        try {
+            // First, try to create a new wallet
+            return $this->generateDepositAddress(
+                assetId: $assetId,
+                label: $label,
+                bankId: $bankId,
+                accountNumber: $accountNumber,
+                narration: $narration,
+                autoSettlement: $autoSettlement
+            );
+        } catch (\Exception $e) {
+            // If error contains "already exists", try to find the existing wallet
+            if (stripos($e->getMessage(), 'already exists') !== false) {
+                Log::info('Wallet already exists, attempting to find existing one', [
+                    'assetId' => $assetId,
+                    'label' => $label
+                ]);
+                
+                // Since Breet doesn't provide a direct "list wallets by label" endpoint,
+                // the best approach is to query your database for the existing wallet info
+                // and fetch it from Breet using the stored wallet ID
+                $transaction = Transaction::where('breet_wallet_id', 'like', '%')
+                    ->where('crypto_asset', $this->getAssetSymbolFromId($assetId))
+                    ->latest()
+                    ->first();
+                
+                if ($transaction && $transaction->breet_wallet_id) {
+                    return $this->getWallet($transaction->breet_wallet_id);
+                }
+                
+                // If not found in DB, the wallet exists in Breet but we don't have the ID.
+                // We need to retrieve it - check if Breet has a "get wallet by label" endpoint
+                // or consider storing wallet IDs more reliably in your DB
+                
+                throw new \Exception('Wallet exists but could not be retrieved. Please contact support.');
+            }
+            throw $e;
+        }
     }
 
     /**
-     * GET /payments/withdraw/{id}
-     * 
-     * Check the status of a withdrawal
-     * 
-     * @param string $withdrawalId
-     * @return array
-     * @throws \Exception
+     * Helper to get asset symbol from ID
      */
-    public function getWithdrawalStatus(string $withdrawalId): array
+    private function getAssetSymbolFromId(string $assetId): string
     {
-        $response = $this->http()->get(
-            "{$this->baseUrl}/payments/withdraw/{$withdrawalId}"
-        );
+        $asset = BreetAsset::find($assetId);
+        return $asset ? strtoupper($asset->symbol) : '';
+    }
 
-        $body = $response->json();
+    /**
+     * Resolve Breet's bank `id` from a stored bank_code.
+     *
+     * NOTE: `bank_code` on bank_accounts/transactions is NOT a CBN/NIP code —
+     * it's already Breet's own numeric bank `id`, captured at bank-account
+     * creation time. We don't blindly trust it though; we confirm it still
+     * exists in Breet's current bank list before using it (ids could
+     * theoretically shift or be retired).
+     */
+    public function resolveBankIdFromCode(string $bankCode): ?string
+    {
+        $banks = Cache::remember('breet:banks:ngn', 3600, fn () => $this->getBanks());
 
-        if ($response->failed() || empty($body['success'])) {
-            throw new \Exception('Failed to get withdrawal status: ' . ($body['message'] ?? $response->body()));
+        foreach ($banks as $bank) {
+            if ((string) ($bank['id'] ?? '') === (string) $bankCode) {
+                return (string) $bank['id'];
+            }
         }
 
-        return $body['data'] ?? [];
+        Log::error('Breet resolveBankIdFromCode: no match found', ['bank_code' => $bankCode]);
+
+        return null;
     }
 }

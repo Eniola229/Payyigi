@@ -59,6 +59,7 @@ return [
         'app_secret'     => env('BREET_APP_SECRET'),
         'env'            => env('BREET_ENV', 'production'),
         'webhook_secret' => env('BREET_WEBHOOK_SECRET'),
+        'withdrawal_pin' => env('BREET_WITHDRAWAL_PIN'),
     ],
 
     'brevo' => [
