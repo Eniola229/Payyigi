@@ -10,7 +10,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\DB;
-
+ 
 /**
  * Breet Webhook Handler
  * POST /webhooks/breet
@@ -29,6 +29,8 @@ class BreetWebhookController extends Controller
 
         // ── 2. PARSE PAYLOAD ──────────────────────────────────────────────────
         $payload = $request->json()->all();
+
+        Log::info('Breet webhook RAW payload', ['payload' => $payload]);
 
         $event     = $payload['event']   ?? null;
         $breetTxId = $payload['id']      ?? null;
@@ -141,51 +143,74 @@ class BreetWebhookController extends Controller
     private function handleCompleted(Transaction $txn, array $payload, BreetService $breet): void
     {
         if ($txn->isCompleted()) {
-            Log::info('Breet webhook: trade.completed already processed', [
-                'reference' => $txn->reference,
-            ]);
+            Log::info('Breet webhook: trade.completed already processed', ['reference' => $txn->reference]);
             return;
         }
 
         $amountSettled = $payload['amountSettled'] ?? $payload['amount'] ?? 0;
 
+        // Breet's webhook does NOT reliably populate amountSettled — confirmed
+        // it sends 0 on trade.completed. Always confirm against the REST API.
         if ($amountSettled <= 0) {
-            Log::error('Breet webhook: invalid settlement amount', [
-                'reference' => $txn->reference,
-                'amount' => $amountSettled
+            Log::warning('Breet webhook: amount missing/zero in payload, fetching from API', [
+                'reference'   => $txn->reference,
+                'breet_tx_id' => $payload['id'] ?? $txn->provider_reference,
             ]);
+
+            try {
+                $breetTxId = $payload['id'] ?? $txn->provider_reference;
+                $data = $breet->getTransaction($breetTxId);
+                $amountSettled = $data['amountSettled'] ?? $data['amount'] ?? 0;
+                $payload = array_merge($payload, $data);
+            } catch (\Exception $e) {
+                Log::error('Breet webhook: fallback fetch failed', [
+                    'reference' => $txn->reference,
+                    'error'     => $e->getMessage(),
+                ]);
+            }
+        }
+
+        if ($amountSettled <= 0) {
+            Log::error('Breet webhook: invalid settlement amount even after API fallback', [
+                'reference' => $txn->reference,
+            ]);
+            \App\Jobs\PollSellStatus::dispatch($txn->fresh())->delay(now()->addSeconds(60));
             return;
         }
 
         try {
             DB::transaction(function () use ($txn, $payload, $amountSettled, $breet) {
-                // Update to processing state
                 $txn->update([
                     'status' => 'processing',
                     'metadata' => array_merge((array) ($txn->metadata ?? []), [
                         'settlement_amount' => $amountSettled,
-                        'settlement_rate' => $payload['settlementRate'] ?? $payload['rate'] ?? null,
+                        'settlement_rate'   => $payload['settlementRate'] ?? $payload['rate'] ?? null,
                     ]),
                 ]);
 
-                // ── CALL BREET PAYOUT API ────────────────────────────────────
-                $payoutResult = $breet->createWithdrawal([
-                    'bankCode' => $txn->bank_code,
-                    'accountNumber' => $txn->account_number,
-                    'accountName' => $txn->account_name,
-                    'amount' => $amountSettled,
-                    'currency' => 'NGN',
-                    'narration' => "PayYigi sell order #{$txn->reference}",
-                    'reference' => $txn->reference,
-                ]);
+                // ── REAL PAYOUT FLOW (createWithdrawal() never existed) ──────────
+                $breetBankId = $breet->resolveBankIdFromCode($txn->bank_code);
 
-                // Store payout reference
+                if (!$breetBankId) {
+                    throw new \Exception("Could not resolve Breet bank id for bank code '{$txn->bank_code}'.");
+                }
+
+                $breet->verifyBankAccount($breetBankId, $txn->account_number);
+
+                $bank = $breet->addBank($breetBankId, $txn->account_number, "PayYigi sell #{$txn->reference}");
+
+                $payoutResult = $breet->withdrawToBank(
+                    savedBankId: $bank['id'],
+                    amount: $amountSettled,
+                    externalId: $txn->reference,
+                    narration: "PayYigi sell order #{$txn->reference}",
+                );
+
                 $txn->update([
-                    'provider_payout_id' => $payoutResult['id'] ?? null,
+                    'provider_payout_id'     => $payoutResult['id'] ?? null,
                     'provider_payout_status' => $payoutResult['status'] ?? 'pending',
                 ]);
 
-                // ── MARK AS COMPLETED ────────────────────────────────────────
                 PollSellStatus::markCompleted($txn->fresh(), [
                     'amountSettled'  => $amountSettled,
                     'feeAmountInUsd' => $payload['feeAmountInUsd'] ?? $payload['feeAmount'] ?? 0,
@@ -197,26 +222,23 @@ class BreetWebhookController extends Controller
                     'markupAmount'   => $payload['markupAmount'] ?? null,
                     'flagFeeUSD'     => $payload['flagFeeUSD'] ?? 0,
                     'walletCredited' => $payload['walletCredited'] ?? null,
-                ]);
+                ], $breet);
 
-                // ── MONITOR PAYOUT STATUS ────────────────────────────────────
                 \App\Jobs\MonitorPayoutStatus::dispatch($txn->fresh())->delay(now()->addSeconds(30));
             });
-
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {   // ← \Throwable, not \Exception — catches Error too
             Log::error('Breet payout failed', [
                 'reference' => $txn->reference,
-                'error' => $e->getMessage(),
+                'error'     => $e->getMessage(),
             ]);
 
             $txn->update([
-                'status' => 'failed',
+                'status'         => 'failed',
                 'failure_reason' => 'Payout failed: ' . $e->getMessage(),
-                'failed_at' => now(),
+                'failed_at'      => now(),
             ]);
         }
     }
-
     private function handleFlagged(Transaction $txn, array $payload): void
     {
         $breetTxId = $payload['id'] ?? null;

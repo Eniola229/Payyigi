@@ -7,7 +7,7 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Cache;
 
 class BreetService
-{
+{ 
     private string $baseUrl;
     private string $appId;
     private string $appSecret;
@@ -565,7 +565,7 @@ public function withdrawToBank(
     ?string $narration = null,
 ): array {
     $payload = [
-        'amount'     => $amount,
+        'amount'     => round($amount, 2),
         'narration'  => substr($narration ?? 'PayYigi payout', 0, 32),
         'externalId' => $externalId,
     ];
