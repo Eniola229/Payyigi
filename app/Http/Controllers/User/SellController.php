@@ -14,7 +14,7 @@ use Illuminate\Support\Facades\Log;
 use App\Services\Korapay\KorapayService;
 
 class SellController extends Controller
-{
+{ 
     public function __construct(
         private readonly BreetService $breet,
         private readonly KorapayService $korapay,
@@ -35,6 +35,12 @@ class SellController extends Controller
     /**
      * GET /api/v1/sell/rate?asset=BTC&network=Bitcoin&amount=21.00&currency=ngn
      * `amount` is USD value.
+     *
+     * The ngn_amount returned here is already NET of PayYigi's own platform
+     * fee (config('payyigi.platform_fee_percent')). This is entirely our own
+     * cut, calculated independently of whatever Breet does or doesn't deduct
+     * on their end — Breet's dashboard "markup" setting proved unreliable
+     * for this per-address flow, so we don't rely on it at all anymore.
      */
     public function getRate(Request $request): JsonResponse
     {
@@ -65,6 +71,11 @@ class SellController extends Controller
                 $request->currency ?? 'ngn'
             );
 
+            $grossNgn    = (float) ($rateData['NGNAmount'] ?? 0);
+            $feePercent  = (float) config('payyigi.platform_fee_percent', 1.0);
+            $platformFee = round($grossNgn * $feePercent / 100, 2);
+            $netNgn      = round($grossNgn - $platformFee, 2);
+
             return response()->json([
                 'data' => [
                     'asset'         => strtoupper($request->asset),
@@ -72,10 +83,10 @@ class SellController extends Controller
                     'usd_value'     => $amountInUSD,
                     'currency'      => strtoupper($request->currency ?? 'NGN'),
                     'rate'          => $rateData['rate'],
-                    'ngn_amount'    => $rateData['NGNAmount'],
+                    'ngn_amount'    => $netNgn,
                     'crypto_amount' => $rateData['cryptoAmount'],
                     'minimum'       => $breetAsset->minimum,
-                    'note'          => 'Final amount is determined by Breet at settlement time.',
+                    'note'          => 'This amount already includes our service fee. Final amount may vary slightly based on network conditions at settlement.',
                 ],
             ]);
         } catch (\Exception $e) {
@@ -112,8 +123,16 @@ class SellController extends Controller
                 $request->currency ?? 'ngn'
             );
 
+            // Snapshot our fee % at initiation time so a later config change
+            // never retroactively alters what was promised on this order.
+            $feePercent          = (float) config('payyigi.platform_fee_percent', 1.0);
+            $grossNgnEstimate    = (float) ($rateData['NGNAmount'] ?? 0);
+            $platformFeeEstimate = round($grossNgnEstimate * $feePercent / 100, 2);
+            $netNgnEstimate      = round($grossNgnEstimate - $platformFeeEstimate, 2);
+
             $transaction = DB::transaction(function () use (
-                $user, $bankAccount, $request, $breetAsset, $cryptoAmount, $amountInUSD, $rateData
+                $user, $bankAccount, $request, $breetAsset, $cryptoAmount, $amountInUSD,
+                $rateData, $feePercent, $grossNgnEstimate, $platformFeeEstimate, $netNgnEstimate
             ) {
                 $txn = Transaction::create([
                     'user_id'         => $user->id,
@@ -139,9 +158,12 @@ class SellController extends Controller
                     'rate_locked_at'  => now(),
                     'rate_expires_at' => now()->addSeconds((int) config('payyigi.rate_lock_seconds', 60)),
                     'metadata'        => [
-                        'estimated_ngn'  => $rateData['NGNAmount']    ?? 0,
-                        'usd_value'      => round($amountInUSD, 2),
-                        'breet_asset_id' => $breetAsset->id,
+                        'estimated_ngn'         => $netNgnEstimate,      // shown to user
+                        'estimated_ngn_gross'   => $grossNgnEstimate,    // pre-fee, for our own records
+                        'platform_fee_percent'  => $feePercent,
+                        'platform_fee_estimate' => $platformFeeEstimate,
+                        'usd_value'             => round($amountInUSD, 2),
+                        'breet_asset_id'        => $breetAsset->id,
                     ],
                 ]);
 
@@ -192,14 +214,16 @@ class SellController extends Controller
                     ]);
                 } else {
                     // ── GENERATE NEW WALLET OR HANDLE "ALREADY EXISTS" ──────
+                    // NOTE: no bank/autoSettlement passed here anymore. We no
+                    // longer rely on Breet's per-address auto-settlement at
+                    // all — every payout is triggered manually by us at
+                    // settlement time (see PollSellStatus::markCompleted()),
+                    // which is what lets us deduct our own platform fee
+                    // before the money reaches the customer.
                     try {
                         $breetWallet = app(BreetService::class)->generateDepositAddress(
-                            assetId:        $breetAsset->id,
-                            label:          "user-{$user->id}-{$breetAsset->symbol}",
-                            bankId:         $bankAccount->bank_code,
-                            accountNumber:  $bankAccount->account_number,
-                            narration:      'PayYigi sell order',
-                            autoSettlement: true,
+                            assetId: $breetAsset->id,
+                            label:   "user-{$user->id}-{$breetAsset->symbol}",
                         );
 
                         if (empty($breetWallet['wallet_id']) || empty($breetWallet['address'])) {
@@ -367,7 +391,7 @@ class SellController extends Controller
                     'network'         => $transaction->crypto_network,
                     'amount_to_send'  => $transaction->crypto_amount,
                     'deposit_address' => $transaction->deposit_address,
-                    'estimated_ngn'   => $rateData['NGNAmount'] ?? 0,
+                    'estimated_ngn'   => $netNgnEstimate,
                     'destination'     => [
                         'bank_name'      => $transaction->bank_name,
                         'account_number' => $transaction->account_number,

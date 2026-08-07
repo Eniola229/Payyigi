@@ -11,7 +11,7 @@ class BreetService
     private string $baseUrl;
     private string $appId;
     private string $appSecret;
-    private string $env;
+    private string $env; 
 
     public function __construct()
     {
@@ -150,7 +150,7 @@ class BreetService
         ?string $bankId        = null,
         ?string $accountNumber = null,
         ?string $narration     = null,
-        bool    $autoSettlement = true,
+        bool    $autoSettlement = false,
     ): array {
         $payload = ['label' => $label];
 

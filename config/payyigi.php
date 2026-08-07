@@ -3,8 +3,6 @@
 return [
     'rate_lock_seconds' => env('PAYYIGI_RATE_LOCK_SECONDS', 60),
 
-    'platform_fee_percent' => env('PAYYIGI_PLATFORM_FEE', 0.5),
-
     'platform_fee_tiers' => [
         ['min' => 0,   'max' => 100,  'percent' => 3.5],
         ['min' => 100, 'max' => null, 'percent' => 2.5],
@@ -13,6 +11,8 @@ return [
     // LocalRamp country & currency settings
     'country_code'  => env('PAYYIGI_COUNTRY_CODE', 'NG'),
     'fiat_currency' => env('PAYYIGI_FIAT_CURRENCY', 'NGN'),
+
+    'platform_fee_percent' => (float) env('PAYYIGI_FEE_PERCENT', 1.0),
 
     'supported_assets' => ['BTC', 'USDT', 'SOL', 'ETH', 'BNB', 'TRX', 'XRP', 'LTC', 'BCH', 'USDC', 'AVAX', 'TON', 'DOGE'],
 

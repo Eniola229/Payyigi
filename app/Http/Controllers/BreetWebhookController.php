@@ -10,7 +10,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\DB;
- 
+  
 /**
  * Breet Webhook Handler
  * POST /webhooks/breet
@@ -138,7 +138,14 @@ class BreetWebhookController extends Controller
     }
 
     /**
-     * trade.completed - Updated to trigger payout
+     * trade.completed
+     *
+     * Payout is handled entirely by Breet's per-address auto-settlement —
+     * the wallet has autoSettlement enabled with the user's bank linked, so
+     * by the time this webhook fires, Breet has already converted the
+     * crypto, deducted your configured markup, and paid the bank account
+     * directly. This handler only confirms the settled amount and records
+     * completion — it does NOT trigger a second payout.
      */
     private function handleCompleted(Transaction $txn, array $payload, BreetService $breet): void
     {
@@ -179,66 +186,26 @@ class BreetWebhookController extends Controller
         }
 
         try {
-            DB::transaction(function () use ($txn, $payload, $amountSettled, $breet) {
-                $txn->update([
-                    'status' => 'processing',
-                    'metadata' => array_merge((array) ($txn->metadata ?? []), [
-                        'settlement_amount' => $amountSettled,
-                        'settlement_rate'   => $payload['settlementRate'] ?? $payload['rate'] ?? null,
-                    ]),
-                ]);
-
-                // ── REAL PAYOUT FLOW (createWithdrawal() never existed) ──────────
-                $breetBankId = $breet->resolveBankIdFromCode($txn->bank_code);
-
-                if (!$breetBankId) {
-                    throw new \Exception("Could not resolve Breet bank id for bank code '{$txn->bank_code}'.");
-                }
-
-                $breet->verifyBankAccount($breetBankId, $txn->account_number);
-
-                $bank = $breet->addBank($breetBankId, $txn->account_number, "PayYigi sell #{$txn->reference}");
-
-                $payoutResult = $breet->withdrawToBank(
-                    savedBankId: $bank['id'],
-                    amount: $amountSettled,
-                    externalId: $txn->reference,
-                    narration: "PayYigi sell order #{$txn->reference}",
-                );
-
-                $txn->update([
-                    'provider_payout_id'     => $payoutResult['id'] ?? null,
-                    'provider_payout_status' => $payoutResult['status'] ?? 'pending',
-                ]);
-
-                PollSellStatus::markCompleted($txn->fresh(), [
-                    'amountSettled'  => $amountSettled,
-                    'feeAmountInUsd' => $payload['feeAmountInUsd'] ?? $payload['feeAmount'] ?? 0,
-                    'rate'           => $payload['rate'] ?? 0,
-                    'settlementRate' => $payload['settlementRate'] ?? $payload['rate'] ?? 0,
-                    'cryptoReceived' => $payload['cryptoAmount'] ?? null,
-                    'txHash'         => $payload['txHash'] ?? null,
-                    'markupPercent'  => $payload['markupPercent'] ?? null,
-                    'markupAmount'   => $payload['markupAmount'] ?? null,
-                    'flagFeeUSD'     => $payload['flagFeeUSD'] ?? 0,
-                    'walletCredited' => $payload['walletCredited'] ?? null,
-                ], $breet);
-
-                \App\Jobs\MonitorPayoutStatus::dispatch($txn->fresh())->delay(now()->addSeconds(30));
-            });
-        } catch (\Throwable $e) {   // ← \Throwable, not \Exception — catches Error too
-            Log::error('Breet payout failed', [
+            PollSellStatus::markCompleted($txn->fresh(), [
+                'amountSettled'  => $amountSettled,
+                'feeAmountInUsd' => $payload['feeAmountInUsd'] ?? $payload['feeAmount'] ?? 0,
+                'rate'           => $payload['rate'] ?? 0,
+                'settlementRate' => $payload['settlementRate'] ?? $payload['rate'] ?? 0,
+                'cryptoReceived' => $payload['cryptoAmount'] ?? null,
+                'txHash'         => $payload['txHash'] ?? null,
+                'markupPercent'  => $payload['markupPercent'] ?? null,
+                'markupAmount'   => $payload['markupAmount'] ?? null,
+                'flagFeeUSD'     => $payload['flagFeeUSD'] ?? 0,
+                'walletCredited' => $payload['walletCredited'] ?? null,
+            ], $breet);
+        } catch (\Throwable $e) {
+            Log::error('Breet webhook: failed to record completion', [
                 'reference' => $txn->reference,
                 'error'     => $e->getMessage(),
             ]);
-
-            $txn->update([
-                'status'         => 'failed',
-                'failure_reason' => 'Payout failed: ' . $e->getMessage(),
-                'failed_at'      => now(),
-            ]);
         }
     }
+
     private function handleFlagged(Transaction $txn, array $payload): void
     {
         $breetTxId = $payload['id'] ?? null;
