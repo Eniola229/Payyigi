@@ -7,3 +7,5 @@ use Illuminate\Support\Facades\Log;
 
 
 Schedule::command('breet:sync-assets')->daily();
+
+Schedule::command('transactions:expire-stale-sell')->hourly();
