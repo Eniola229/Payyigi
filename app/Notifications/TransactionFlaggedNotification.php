@@ -8,7 +8,7 @@ use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Notifications\Notification;
 
-class TransactionFlaggedNotification extends Notification implements ShouldQueue
+class TransactionFlaggedNotification extends Notification
 {
     use Queueable;
 

@@ -8,7 +8,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Notifications\Messages\MailMessage;
 use Illuminate\Notifications\Notification;
 
-class WithdrawalFailedNotification extends Notification implements ShouldQueue
+class WithdrawalFailedNotification extends Notification
 {
     use Queueable;
 
