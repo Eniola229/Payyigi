@@ -241,6 +241,14 @@ Route::middleware(['auth:sanctum', 'account.active'])->group(function () {
             Route::get('/audit-logs',   [\App\Http\Controllers\Admin\LogsController::class, 'auditLogs']);
             Route::get('/webhook-logs', [\App\Http\Controllers\Admin\LogsController::class, 'webhookLogs']);
 
+
+            Route::prefix('newsletters')->middleware('role:super_admin')->group(function () {
+                Route::get('/',            [\App\Http\Controllers\Admin\NewsletterController::class, 'index']);
+                Route::get('/{newsletter}',[\App\Http\Controllers\Admin\NewsletterController::class, 'show']);
+                Route::post('/',           [\App\Http\Controllers\Admin\NewsletterController::class, 'store']);
+                Route::post('/{newsletter}/process-batch', [\App\Http\Controllers\Admin\NewsletterController::class, 'processBatch']);
+            });
+
             // Admin management — super_admin only
             Route::prefix('admins')->middleware('role:super_admin')->group(function () {
                 Route::get('/',                     [\App\Http\Controllers\Admin\AdminManagementController::class, 'index']);
