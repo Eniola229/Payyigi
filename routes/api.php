@@ -20,6 +20,10 @@ use Illuminate\Support\Facades\Route;
 Route::post('/webhooks/korapay', [\App\Http\Controllers\KorapayWebhookController::class, 'handle']);
 Route::post('/webhooks/breet', [\App\Http\Controllers\BreetWebhookController::class, 'handle']);
 
+Route::post('/support/request', [\App\Http\Controllers\Support\SupportAccessController::class, 'request'])
+     ->middleware('throttle:5,10');
+
+
 
 Route::get('/sell/assets',       [SellController::class, 'assets']);
 // ── Public Auth ──────────────────────────────────────────────────────────────

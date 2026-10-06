@@ -1,0 +1,13 @@
+1791326274s:864:"- AVAX (Avalanche Fuji Testnet): Avalanche (min 50 USD)
+- BCH (Bitcoin Cash Test): Bitcoin_Cash (min 5000 USD)
+- BNB (BNB Smart Chain Testnet): Binance_Smart_Chain (min 5 USD)
+- BTC (Bitcoin Test): Bitcoin (min 2 USD)
+- DOGE (Doge Coin Test): Dogecoin (min 5000 USD)
+- ETH (Ethereum Test (Sepolia)): Ethereum (min 5 USD)
+- LTC (Litecoin Test): Litecoin (min 2 USD)
+- SOL (Solana Test): Solana (min 15 USD)
+- TON (TON Testnet): TON (min 50 USD)
+- TRX (Tron Test): Tron (min 5 USD)
+- USDC (USD Coin (Base Testnet)): Base (min 50 USD); Ethereum (min 50 USD); Solana (min 50 USD); Arbitrum (min 50 USD); Polygon (min 50 USD); Binance_Smart_Chain (min 10 USD)
+- USDT (USD Tether (Tron Testnet)): Tron (min 50 USD); Ethereum (min 50 USD); Solana (min 50 USD); Binance_Smart_Chain (min 50 USD); Polygon (min 50 USD); TON (min 50 USD)
+- XRP (XRP Testnet): XRP (min 50 USD)";

@@ -72,4 +72,16 @@ return [
 
     'frontend_url' => env('FRONTEND_URL', 'http://localhost:3000'),
 
+    'support' => [
+        'email'         => env('SUPPORT_EMAIL', 'support@payyigi.com'),
+        'records_email' => env('SUPPORT_RECORDS_EMAIL', 'records-of-supportsaichats@payyigi.com'),
+        'portal_url'    => env('SUPPORT_PORTAL_URL'),   // optional, defaults to APP_URL
+    ],
+
+    'support_ai' => [
+        'key'      => env('ZAI_API_KEY'),
+        'base_url' => env('ZAI_BASE_URL', 'https://open.bigmodel.cn/api/paas/v4'),
+        'model'    => env('SUPPORT_AI_MODEL', 'glm-4.7-flash'),
+    ],
+
 ];
