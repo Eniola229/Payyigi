@@ -27,7 +27,8 @@ class SupportChatController extends Controller
     {
         $tickets = SupportTicket::where('email', $this->email())
             ->orderByDesc('last_message_at')
-            ->get(['id', 'reference', 'subject', 'status', 'last_message_at']);
+            ->get(['id', 'reference', 'subject', 'status', 'last_message_at'])
+            ->values();
 
         return response()->json(['data' => $tickets]);
     }

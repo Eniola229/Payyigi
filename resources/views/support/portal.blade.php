@@ -80,12 +80,30 @@ const csrf=document.querySelector('meta[name=csrf-token]').content;
 const $=id=>document.getElementById(id);
 let tickets=[],active=null,busy=false;
 
+/* ---- finders: locate things in the reply however many layers wrap them ---- */
+function findObj(x,pred,depth=0){
+  if(!x||typeof x!=='object'||depth>8)return null;
+  if(!Array.isArray(x)&&pred(x))return x;
+  for(const v of Object.values(x)){const f=findObj(v,pred,depth+1);if(f)return f}
+  return null;
+}
+function findArr(x,pred,depth=0){
+  if(!x||typeof x!=='object'||depth>8)return null;
+  if(Array.isArray(x)){if(x.length&&x.every(pred))return x}
+  for(const v of Object.values(x)){const f=findArr(v,pred,depth+1);if(f)return f}
+  return null;
+}
+const isTicket=o=>o&&o.id&&o.reference&&!o.role;
+const isMsg=o=>o&&o.id&&o.role&&typeof o.body==='string';
+
 async function api(url,opt={}){
   const r=await fetch(url,{...opt,headers:{'Accept':'application/json','Content-Type':'application/json','X-CSRF-TOKEN':csrf,'X-Requested-With':'XMLHttpRequest'}});
+  const text=await r.text();
+  let d=null;try{d=JSON.parse(text)}catch{}
   if(r.status===401){location.href='/support?expired=1';throw new Error('expired')}
-  const d=await r.json().catch(()=>({}));
-  if(!r.ok)throw new Error(d.message||'Something went wrong. Try again.');
-  return d.data??d;
+  if(!r.ok)throw new Error((d&&d.message)||('Request failed ('+r.status+')'));
+  if(d===null)throw new Error('Server did not return JSON (status '+r.status+'): '+text.slice(0,120));
+  return d;
 }
 const ago=s=>{if(!s)return'';const d=new Date(s);return d.toLocaleDateString(undefined,{day:'numeric',month:'short'})+' '+d.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'})};
 
@@ -110,19 +128,28 @@ function setHeader(t){
   c.className='chip '+t.status;
   $('input').disabled=t.status==='closed';$('send').disabled=t.status==='closed';
 }
-async function loadTickets(){tickets=await api('/support/tickets');renderList()}
+async function loadTickets(){
+  const d=await api('/support/tickets');
+  tickets=findArr(d,isTicket)||[];
+  renderList();
+}
+
+function showChat(d){
+  const ticket=findObj(d,isTicket);
+  if(!ticket)throw new Error('Unexpected reply from server. Open the browser console and look for [support].');
+  const msgs=findArr(d,isMsg)||[];
+  active=ticket.id;
+  const i=tickets.findIndex(t=>t.id===ticket.id);
+  if(i>-1)tickets[i]=ticket;else tickets.unshift(ticket);
+  renderList();$('app').classList.add('chatting');
+  setHeader(ticket);$('msgs').replaceChildren();msgs.forEach(m=>bubble(m.role,m.body));$('input').focus();
+}
 
 async function openTicket(id){
-  active=id;renderList();$('app').classList.add('chatting');
-  const {ticket,messages}=await api('/support/tickets/'+id);
-  setHeader(ticket);$('msgs').replaceChildren();messages.forEach(m=>bubble(m.role,m.body));$('input').focus();
+  try{showChat(await api('/support/tickets/'+id))}catch(e){alert(e.message)}
 }
 $('new').onclick=async()=>{
-  try{
-    const {ticket,messages}=await api('/support/tickets',{method:'POST'});
-    tickets.unshift(ticket);active=ticket.id;renderList();$('app').classList.add('chatting');
-    setHeader(ticket);$('msgs').replaceChildren();messages.forEach(m=>bubble(m.role,m.body));$('input').focus();
-  }catch(e){alert(e.message)}
+  try{showChat(await api('/support/tickets',{method:'POST'}))}catch(e){alert(e.message)}
 };
 $('back').onclick=()=>$('app').classList.remove('chatting');
 $('out').onclick=async()=>{try{await api('/support/logout',{method:'POST'})}catch{}location.href='/support'};
@@ -136,10 +163,16 @@ $('form').addEventListener('submit',async e=>{
   const wait=bubble('ai','');wait.innerHTML='<span class="typing"><i></i><i></i><i></i></span>';
   try{
     const d=await api('/support/tickets/'+active+'/messages',{method:'POST',body:JSON.stringify({message:text})});
-    wait.textContent=d.ai.body;
-    const i=tickets.findIndex(t=>t.id===active);if(i>-1)tickets[i]=d.ticket;
-    tickets.sort((a,b)=>new Date(b.last_message_at)-new Date(a.last_message_at));
-    setHeader(d.ticket);renderList();scroll();
+    const ai=findObj(d,o=>o&&o.role==='ai'&&typeof o.body==='string');
+    const ticket=findObj(d,isTicket);
+    if(!ai)throw new Error('No reply received. Please try again.');
+    wait.textContent=ai.body;
+    if(ticket){
+      const i=tickets.findIndex(t=>t.id===ticket.id);if(i>-1)tickets[i]=ticket;
+      tickets.sort((a,b)=>new Date(b.last_message_at)-new Date(a.last_message_at));
+      setHeader(ticket);renderList();
+    }
+    scroll();
   }catch(err){wait.remove();bubble('err',err.message)}
   busy=false;$('send').disabled=false;$('input').focus();
 });
@@ -147,7 +180,7 @@ const autoGrow=()=>{const t=$('input');t.style.height='auto';t.style.height=Math
 $('input').addEventListener('input',autoGrow);
 $('input').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();$('form').requestSubmit()}});
 
-loadTickets();
+loadTickets().catch(e=>console.error('[support] could not load tickets',e));
 </script>
 </body>
 </html>
